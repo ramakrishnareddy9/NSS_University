@@ -6,6 +6,7 @@ const User = require('../models/User');
 const Notification = require('../models/Notification');
 const { auth, authorize } = require('../middleware/auth');
 const { sendNewEventNotification } = require('../utils/notifications');
+const escapeRegex = require('../utils/escapeRegex');
 
 const router = express.Router();
 
@@ -16,13 +17,14 @@ router.get('/', auth, async (req, res) => {
   try {
     const { status, eventType, search } = req.query;
     const query = {};
+    const allowedStudentStatuses = ['published', 'ongoing', 'completed'];
 
     // Students can only see published events
     if (req.user.role === 'student') {
-      query.status = { $in: ['published', 'ongoing', 'completed'] };
+      query.status = { $in: allowedStudentStatuses };
     }
 
-    if (status) {
+    if (status && (req.user.role !== 'student' || allowedStudentStatuses.includes(status))) {
       query.status = status;
     }
 
@@ -31,9 +33,10 @@ router.get('/', auth, async (req, res) => {
     }
 
     if (search) {
+      const safeSearch = escapeRegex(search.trim());
       query.$or = [
-        { title: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
+        { title: { $regex: safeSearch, $options: 'i' } },
+        { description: { $regex: safeSearch, $options: 'i' } }
       ];
     }
 
@@ -112,6 +115,21 @@ router.post('/', [
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { startDate, endDate, registrationDeadline } = req.body;
+
+    // Cross-field validation: endDate must be after startDate; registrationDeadline must be before startDate
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const regDeadline = new Date(registrationDeadline);
+
+    if (!(end > start)) {
+      return res.status(400).json({ message: 'endDate must be after startDate' });
+    }
+
+    if (!(regDeadline < start)) {
+      return res.status(400).json({ message: 'registrationDeadline must be before startDate' });
     }
 
     const eventData = {
@@ -448,6 +466,19 @@ router.delete('/:id', [auth, authorize('admin')], async (req, res) => {
 
     // Delete related participations
     await Participation.deleteMany({ event: event._id });
+
+    // Also delete related contributions, problems (reports), and notifications to avoid orphaned records
+    try {
+      const Contribution = require('../models/Contribution');
+      const Problem = require('../models/Problem');
+      const Notification = require('../models/Notification');
+
+      await Contribution.deleteMany({ event: event._id });
+      await Problem.deleteMany({ eventId: event._id });
+      await Notification.deleteMany({ event: event._id });
+    } catch (cleanupErr) {
+      console.error('Error cleaning up related records for event deletion:', cleanupErr);
+    }
 
     // Broadcast event deletion to all connected users
     const io = req.app.get('io');

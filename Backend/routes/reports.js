@@ -920,6 +920,7 @@ router.post('/admin/event-summary/:eventId', [auth, authorize('admin', 'faculty'
 // @access  Private (Admin/Faculty)
 router.get('/file-proxy', [auth, authorize('admin', 'faculty')], async (req, res) => {
   try {
+    const maxProxyFileSizeBytes = 50 * 1024 * 1024;
     const fileUrl = req.query.url;
 
     if (!fileUrl || typeof fileUrl !== 'string') {
@@ -937,6 +938,12 @@ router.get('/file-proxy', [auth, authorize('admin', 'faculty')], async (req, res
     if (!response.ok) {
       console.error('Cloudinary fetch failed:', response.status, await response.text().catch(() => ''));
       return res.status(502).json({ message: 'Failed to fetch file from storage' });
+    }
+
+    const contentLengthHeader = response.headers.get('content-length');
+    const contentLength = contentLengthHeader ? Number(contentLengthHeader) : null;
+    if (contentLength !== null && Number.isFinite(contentLength) && contentLength > maxProxyFileSizeBytes) {
+      return res.status(413).json({ message: 'File is too large to proxy' });
     }
 
     const contentType = response.headers.get('content-type') || 'application/octet-stream';

@@ -9,13 +9,14 @@ const passwordResetOTPSchema = new mongoose.Schema({
   },
   otp: {
     type: String,
-    required: true
+    required: true,
+    select: false
   },
   expiresAt: {
     type: Date,
     required: true,
-    default: Date.now,
-    expires: 600 // 10 minutes in seconds
+    // Store an absolute expiry time (10 minutes from creation). Use a TTL index with expireAfterSeconds: 0.
+    default: () => new Date(Date.now() + 10 * 60 * 1000)
   },
   isUsed: {
     type: Boolean,
@@ -26,6 +27,7 @@ const passwordResetOTPSchema = new mongoose.Schema({
 });
 
 // Index for cleanup of expired documents
+// Create a TTL index on `expiresAt` where documents expire at the stored date.
 passwordResetOTPSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 module.exports = mongoose.model('PasswordResetOTP', passwordResetOTPSchema);

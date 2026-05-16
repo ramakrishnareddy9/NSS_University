@@ -2,7 +2,9 @@ const express = require('express');
 const User = require('../models/User');
 const Participation = require('../models/Participation');
 const Contribution = require('../models/Contribution');
+const Event = require('../models/Event');
 const { auth, authorize } = require('../middleware/auth');
+const escapeRegex = require('../utils/escapeRegex');
 
 const router = express.Router();
 
@@ -19,10 +21,11 @@ router.get('/', [auth, authorize('admin', 'faculty')], async (req, res) => {
     }
 
     if (search) {
+      const safeSearch = escapeRegex(search.trim());
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
-        { studentId: { $regex: search, $options: 'i' } }
+        { name: { $regex: safeSearch, $options: 'i' } },
+        { email: { $regex: safeSearch, $options: 'i' } },
+        { studentId: { $regex: safeSearch, $options: 'i' } }
       ];
     }
 
@@ -44,7 +47,7 @@ router.get('/stats', [auth, authorize('admin', 'faculty')], async (req, res) => 
   try {
     const totalStudents = await User.countDocuments({ role: 'student' });
     const totalFaculty = await User.countDocuments({ role: 'faculty' });
-    const totalEvents = await (await require('../models/Event').find({})).length;
+    const totalEvents = await Event.countDocuments();
     const totalParticipations = await Participation.countDocuments({});
     const totalContributions = await Contribution.countDocuments({});
     

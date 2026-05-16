@@ -3,6 +3,7 @@ const router = express.Router();
 const User = require('../models/User');
 const Event = require('../models/Event');
 const Participation = require('../models/Participation');
+const { auth, authorize } = require('../middleware/auth');
 
 // @route   GET /api/stats/landing
 // @desc    Get statistics for landing page
@@ -15,9 +16,9 @@ router.get('/landing', async (req, res) => {
     // Count total events
     const totalEvents = await Event.countDocuments();
 
-    // Count unique institutions (from student profiles)
-    const institutions = await User.distinct('college', { role: 'student' });
-    const totalInstitutions = institutions.filter(college => college && college.trim() !== '').length || 1;
+    // Count unique departments as a proxy for institutions (no 'college' field in user schema)
+    const departments = await User.distinct('department', { role: 'student' });
+    const totalInstitutions = departments.filter(d => d && d.trim() !== '').length || 1;
 
     // Calculate total hours of service
     // Sum up all event durations or participation hours
@@ -52,12 +53,12 @@ router.get('/landing', async (req, res) => {
 // @route   GET /api/stats/dashboard
 // @desc    Get detailed statistics for admin dashboard
 // @access  Private (Admin)
-router.get('/dashboard', async (req, res) => {
+router.get('/dashboard', [auth, authorize('admin', 'faculty')], async (req, res) => {
   try {
     const totalStudents = await User.countDocuments({ role: 'student' });
     const totalFaculty = await User.countDocuments({ role: 'faculty' });
     const totalEvents = await Event.countDocuments();
-    const activeEvents = await Event.countDocuments({ status: 'active' });
+    const activeEvents = await Event.countDocuments({ status: { $in: ['published', 'ongoing'] } });
     const completedEvents = await Event.countDocuments({ status: 'completed' });
     
     const totalParticipations = await Participation.countDocuments();

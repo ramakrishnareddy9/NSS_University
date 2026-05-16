@@ -1,16 +1,18 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
+const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const PasswordResetOTP = require('../models/PasswordResetOTP');
 const { auth } = require('../middleware/auth');
 const { sendPasswordResetOTP, generateOTP } = require('../utils/notifications');
 
 const router = express.Router();
+const jwtSecret = process.env.JWT_SECRET;
 
 // Generate JWT Token
 const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET || 'fallback_secret', {
+  return jwt.sign({ id }, jwtSecret, {
     expiresIn: process.env.JWT_EXPIRE || '7d'
   });
 };
@@ -22,7 +24,7 @@ router.post('/register', [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Please provide a valid email'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('role').isIn(['admin', 'faculty', 'student']).withMessage('Invalid role'),
+  body('role').equals('student').withMessage('Public registration is limited to students'),
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -30,7 +32,7 @@ router.post('/register', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { name, email, password, role, studentId, phone, department, year } = req.body;
+    const { name, email, password, role, studentId, phone, department, year, academicYear, batch } = req.body;
 
     // Check if user already exists
     const existingUser = await User.findOne({ email });
@@ -46,6 +48,20 @@ router.post('/register', [
       }
     }
 
+    // Auto-derive academic year like "2024-25" based on current date if not provided
+    const deriveAcademicYear = () => {
+      const now = new Date();
+      const yearNum = now.getFullYear();
+      const month = now.getMonth() + 1; // 1-12
+      // If month >= June, academic year is currentYear-currentYear+1, else previousYear-currentYear
+      const startYear = month >= 6 ? yearNum : yearNum - 1;
+      const endYearShort = (startYear + 1).toString().slice(-2);
+      return `${startYear}-${endYearShort}`;
+    };
+
+    const resolvedAcademicYear = academicYear || (role === 'student' ? deriveAcademicYear() : undefined);
+    const resolvedBatch = batch || resolvedAcademicYear;
+
     // Create user
     const user = new User({
       name,
@@ -55,7 +71,9 @@ router.post('/register', [
       studentId: role === 'student' ? studentId : undefined,
       phone,
       department,
-      year: role === 'student' ? year : undefined
+      year: role === 'student' ? year : undefined,
+      academicYear: role === 'student' ? resolvedAcademicYear : undefined,
+      batch: role === 'student' ? resolvedBatch : undefined
     });
 
     await user.save();
@@ -163,9 +181,10 @@ router.post('/forgot-password', [
     await PasswordResetOTP.deleteMany({ email });
 
     // Store new OTP
+    const otpHash = await bcrypt.hash(otp, 10);
     await PasswordResetOTP.create({
       email,
-      otp,
+      otp: otpHash,
       expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
     });
 
@@ -216,12 +235,16 @@ router.post('/verify-otp', [
     // Find valid OTP
     const otpRecord = await PasswordResetOTP.findOne({
       email,
-      otp,
       isUsed: false,
       expiresAt: { $gt: new Date() }
-    });
+    }).select('+otp');
 
     if (!otpRecord) {
+      return res.status(400).json({ message: 'Invalid or expired OTP' });
+    }
+
+    const isOtpValid = await bcrypt.compare(otp, otpRecord.otp);
+    if (!isOtpValid) {
       return res.status(400).json({ message: 'Invalid or expired OTP' });
     }
 

@@ -10,13 +10,28 @@ const { generateAndSendCertificates } = require('../utils/certificateGenerator')
 
 const router = express.Router();
 
+const requireDebugAccess = (req, res, next) => {
+  if (process.env.NODE_ENV === 'development') {
+    return next();
+  }
+
+  const debugSecret = process.env.CERTIFICATE_DEBUG_SECRET;
+  const providedSecret = req.header('x-certificate-debug-secret');
+
+  if (!debugSecret || providedSecret !== debugSecret) {
+    return res.status(403).json({ message: 'Debug endpoint is disabled' });
+  }
+
+  return next();
+};
+
 // @route   POST /api/certificates/force-save-test/:eventId
 // @desc    TEST endpoint to force save a template URL (for debugging)
 // @access  Private (Admin/Faculty only)
 router.post('/force-save-test/:eventId', [
   auth,
   authorize('admin', 'faculty')
-], async (req, res) => {
+], requireDebugAccess, async (req, res) => {
   try {
     console.log('\n🧪 FORCE SAVE TEST for Event ID:', req.params.eventId);
     const event = await Event.findById(req.params.eventId);
@@ -60,7 +75,7 @@ router.post('/force-save-test/:eventId', [
 router.get('/debug/:eventId', [
   auth,
   authorize('admin', 'faculty')
-], async (req, res) => {
+], requireDebugAccess, async (req, res) => {
   try {
     console.log('\n🔍 Debug Request for Event ID:', req.params.eventId);
     const event = await Event.findById(req.params.eventId);
@@ -347,11 +362,16 @@ router.post('/generate/:eventId', [
   } catch (error) {
     console.error('Generate certificates error:', error);
     console.error('Error stack:', error.stack);
-    res.status(500).json({ 
+    const errorResponse = { 
       message: error.message || 'Server error',
-      error: error.message,
-      stack: error.stack
-    });
+      error: error.message
+    };
+
+    if (process.env.NODE_ENV !== 'production') {
+      errorResponse.stack = error.stack;
+    }
+
+    res.status(500).json(errorResponse);
   }
 });
 
@@ -465,7 +485,13 @@ router.post('/test-preview/:eventId', [
   } catch (error) {
     console.error('Test preview error:', error);
     console.error('Error stack:', error.stack);
-    res.status(500).json({ message: 'Server error', error: error.message, stack: error.stack });
+    const errorResponse = { message: 'Server error', error: error.message };
+
+    if (process.env.NODE_ENV !== 'production') {
+      errorResponse.stack = error.stack;
+    }
+
+    res.status(500).json(errorResponse);
   }
 });
 
@@ -506,7 +532,13 @@ router.get('/my-certificates', auth, async (req, res) => {
   } catch (error) {
     console.error('❌ Error fetching certificates:', error);
     console.error('   Stack:', error.stack);
-    res.status(500).json({ message: 'Server error', error: error.message, stack: error.stack });
+    const errorResponse = { message: 'Server error', error: error.message };
+
+    if (process.env.NODE_ENV !== 'production') {
+      errorResponse.stack = error.stack;
+    }
+
+    res.status(500).json(errorResponse);
   }
 });
 

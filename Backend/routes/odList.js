@@ -10,7 +10,7 @@ const User = require('../models/User');
 
 const PeriodConfig = require('../models/PeriodConfig');
 
-const { auth } = require('../middleware/auth');
+const { auth, authorize } = require('../middleware/auth');
 
 const XLSX = require('xlsx');
 
@@ -18,7 +18,7 @@ const XLSX = require('xlsx');
 
 // Get OD list for an event
 
-router.get('/event/:eventId', auth, async (req, res) => {
+router.get('/event/:eventId', [auth, authorize('admin', 'faculty')], async (req, res) => {
 
   try {
 
@@ -152,7 +152,7 @@ router.get('/event/:eventId', auth, async (req, res) => {
 
 // Generate and download OD list as Excel
 
-router.get('/event/:eventId/download', auth, async (req, res) => {
+router.get('/event/:eventId/download', [auth, authorize('admin', 'faculty')], async (req, res) => {
 
   try {
 

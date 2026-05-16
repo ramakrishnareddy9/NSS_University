@@ -11,6 +11,20 @@ const rateLimit = require('express-rate-limit');
 // Load environment variables
 dotenv.config({ path: path.join(__dirname, '.env') });
 
+const validateRequiredEnvironmentVariables = () => {
+  const requiredVariables = ['JWT_SECRET'];
+  const missingVariables = requiredVariables.filter((variable) => {
+    const value = process.env[variable];
+    return !value || !value.trim();
+  });
+
+  if (missingVariables.length > 0) {
+    throw new Error(`Missing required environment variables: ${missingVariables.join(', ')}`);
+  }
+};
+
+validateRequiredEnvironmentVariables();
+
 // Log environment status (without sensitive data)
 console.log('\n🔧 Environment Configuration:');
 console.log(`   MongoDB URI: ${process.env.MONGODB_URI ? '✅ Set' : '❌ Not set'}`);
@@ -22,6 +36,10 @@ console.log('');
 
 const app = express();
 const server = http.createServer(app);
+const allowedCorsOrigins = [
+  process.env.FRONTEND_URL,
+  'https://nss-latest.onrender.com'
+].filter(Boolean);
 
 // Required when running behind Render/Netlify proxies for correct client IP detection.
 const trustProxySetting = process.env.TRUST_PROXY;
@@ -47,7 +65,10 @@ const io = require('socket.io')(server, {
 app.set('io', io);
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: allowedCorsOrigins,
+  credentials: true
+}));
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
@@ -111,13 +132,14 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Routes
 app.use('/api/auth', authRateLimiter, require('./routes/auth'));
+app.use('/api/admin', require('./routes/admin'));
 app.use('/api/events', require('./routes/events'));
 app.use('/api/participations', require('./routes/participations'));
 app.use('/api/contributions', require('./routes/contributions'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/users', require('./routes/users'));
 app.use('/api/upload', require('./routes/upload'));
-app.use('/api/notifications-api', require('./routes/notifications'));
+app.use('/api/notification-scheduler', require('./routes/notifications'));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -128,7 +150,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.use('/api/notifications-api', require('./routes/notifications-api'));
+app.use('/api/notifications', require('./routes/notifications-api'));
 app.use('/api/certificates', require('./routes/certificates'));
 app.use('/api/ai-assistant', require('./routes/aiAssistant'));
 app.use('/api/stats', require('./routes/stats'));

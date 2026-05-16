@@ -1,6 +1,8 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
+const jwtSecret = process.env.JWT_SECRET;
+
 const auth = async (req, res, next) => {
   try {
     // Support both x-auth-token and Authorization headers
@@ -13,7 +15,7 @@ const auth = async (req, res, next) => {
       return res.status(401).json({ message: 'No token, authorization denied' });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    const decoded = jwt.verify(token, jwtSecret);
     const user = await User.findById(decoded.id).select('-password');
     
     if (!user || !user.isActive) {

@@ -532,10 +532,43 @@ exports.getLeaderboard = async (req, res) => {
       dateFilter = { createdAt: { $gte: startOfYear } };
     }
 
-    const topReporters = await User.find({ role: 'student' })
-      .select('name email studentId department rewardPoints reportingScore problemsApproved badges')
-      .sort({ reportingScore: -1, rewardPoints: -1 })
-      .limit(parseInt(limit));
+    // Build aggregation pipeline to count problems per user for the given period
+    const matchStage = {};
+    // Only consider reports that have a reporter
+    matchStage.reportedBy = { $exists: true };
+    // Apply date filter when provided
+    if (dateFilter && Object.keys(dateFilter).length > 0) {
+      matchStage.createdAt = dateFilter.createdAt;
+    }
+
+    const pipeline = [
+      { $match: matchStage },
+      { $group: { _id: '$reportedBy', problemsCount: { $sum: 1 } } },
+      { $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'user'
+      } },
+      { $unwind: '$user' },
+      { $match: { 'user.role': 'student' } },
+      { $project: {
+          _id: 0,
+          userId: '$_id',
+          problemsCount: 1,
+          name: '$user.name',
+          email: '$user.email',
+          studentId: '$user.studentId',
+          department: '$user.department',
+          rewardPoints: '$user.rewardPoints',
+          reportingScore: '$user.reportingScore',
+          badges: '$user.badges'
+      } },
+      { $sort: { problemsCount: -1, reportingScore: -1, rewardPoints: -1 } },
+      { $limit: parseInt(limit) }
+    ];
+
+    const topReporters = await Problem.aggregate(pipeline);
 
     res.status(200).json({
       success: true,

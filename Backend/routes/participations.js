@@ -92,13 +92,11 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
 
     await participation.save();
 
-    // Update event participant count
-    event.currentParticipants += 1;
-    await event.save();
-
-    // Add participation to event
-    event.participations.push(participation._id);
-    await event.save();
+    // Atomically update event: increment participant count and add participation reference
+    await Event.findByIdAndUpdate(eventId, {
+      $inc: { currentParticipants: 1 },
+      $push: { participations: participation._id }
+    }).catch(err => console.error('Failed to atomically update event on registration:', err));
 
     await participation.populate('student', 'name email studentId');
     await participation.populate('event', 'title eventType startDate endDate location');
@@ -285,16 +283,19 @@ router.put('/:id/reject', [auth, authorize('admin', 'faculty')], async (req, res
     }
 
     participation.status = 'rejected';
-    participation.approvedAt = new Date();
-    participation.approvedBy = req.user.id;
+    participation.rejectedAt = new Date();
+    participation.rejectedBy = req.user.id;
 
     await participation.save();
 
-    // Decrease event participant count
-    const event = await Event.findById(participation.event);
-    if (event) {
-      event.currentParticipants = Math.max(0, event.currentParticipants - 1);
-      await event.save();
+    // Atomically decrement participant count and remove participation reference from event
+    try {
+      await Event.findByIdAndUpdate(participation.event, {
+        $inc: { currentParticipants: -1 },
+        $pull: { participations: participation._id }
+      });
+    } catch (err) {
+      console.error('Failed to atomically update event on rejection:', err);
     }
 
     await participation.populate('student', 'name email studentId');
@@ -324,6 +325,94 @@ router.put('/:id/reject', [auth, authorize('admin', 'faculty')], async (req, res
 
   } catch (error) {
     console.error('Reject participation error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/participations/:id/complete
+// @desc    Mark participation as completed (Admin/Faculty) — allows bypassing contribution requirement
+// @access  Private (Admin/Faculty only)
+router.put('/:id/complete', [auth, authorize('admin', 'faculty')], async (req, res) => {
+  try {
+    const { volunteerHours } = req.body;
+    const participation = await Participation.findById(req.params.id)
+      .populate('student', 'totalVolunteerHours name email')
+      .populate('event', 'startDate endDate title');
+
+    if (!participation) {
+      return res.status(404).json({ message: 'Participation not found' });
+    }
+
+    // Only allow completion from approved/attended states
+    if (!['approved', 'attended', 'pending'].includes(participation.status)) {
+      // allow marking completed even if pending (admin override), but skip if already completed/rejected
+      if (participation.status === 'completed' || participation.status === 'rejected') {
+        return res.status(400).json({ message: 'Participation cannot be completed from its current state' });
+      }
+    }
+
+    // Set completed audit fields
+    participation.status = 'completed';
+    participation.completedAt = new Date();
+    participation.completedBy = req.user.id;
+
+    // If admin provided volunteerHours, validate against event duration cap and update student's totals accordingly
+    if (typeof volunteerHours !== 'undefined') {
+      const newHours = Number(volunteerHours) || 0;
+      const oldHours = participation.volunteerHours || 0;
+
+      // Determine maximum allowed hours: event duration in hours + 2 hour buffer
+      let maxAllowed = 24; // sensible default cap
+      if (participation.event && participation.event.startDate && participation.event.endDate) {
+        const durationInMs = new Date(participation.event.endDate) - new Date(participation.event.startDate);
+        const durationHours = Math.max(0, Math.round(durationInMs / (1000 * 60 * 60)));
+        maxAllowed = Math.max(1, durationHours + 2);
+      }
+
+      if (newHours < 0 || newHours > maxAllowed) {
+        return res.status(400).json({ message: `volunteerHours must be between 0 and ${maxAllowed}` });
+      }
+
+      const delta = newHours - oldHours;
+      participation.volunteerHours = newHours;
+
+      if (delta !== 0) {
+        const student = await User.findById(participation.student._id || participation.student);
+        if (student) {
+          student.totalVolunteerHours = Math.max(0, (student.totalVolunteerHours || 0) + delta);
+          await student.save();
+        }
+      }
+    }
+
+    await participation.save();
+
+    await participation.populate('student', 'name email studentId totalVolunteerHours');
+    await participation.populate('event', 'title eventType startDate endDate');
+
+    // Emit socket event
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('participation-updated', {
+          type: 'participation-updated',
+          message: `Participation completed for "${participation.event.title}"`,
+          participation: {
+            id: participation._id,
+            student: participation.student,
+            event: participation.event,
+            status: participation.status
+          },
+          timestamp: new Date()
+        });
+      }
+    } catch (e) {
+      console.error('Socket emit failed after marking participation complete:', e);
+    }
+
+    res.json(participation);
+  } catch (error) {
+    console.error('Complete participation error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -361,16 +450,33 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty')], async (req,
     if (attended && !wasAttended) {
       console.log('\n📊 Calculating volunteer hours...');
       // Use provided hours or calculate from event duration
-      let hours = volunteerHours;
-      if (!hours && participation.event) {
-        // Calculate hours from event start and end date (in hours)
-        const startDate = new Date(participation.event.startDate);
-        const endDate = new Date(participation.event.endDate);
-        const durationInMs = endDate - startDate;
-        hours = Math.max(1, Math.round(durationInMs / (1000 * 60 * 60))); // Convert to hours, minimum 1 hour
-        console.log(`Calculated from event duration: ${hours} hours`);
+      let hours = typeof volunteerHours !== 'undefined' ? Number(volunteerHours) : undefined;
+      if (typeof hours === 'undefined' || Number.isNaN(hours)) {
+        if (participation.event) {
+          // Calculate hours from event start and end date (in hours)
+          const startDate = new Date(participation.event.startDate);
+          const endDate = new Date(participation.event.endDate);
+          const durationInMs = endDate - startDate;
+          hours = Math.max(1, Math.round(durationInMs / (1000 * 60 * 60))); // Convert to hours, minimum 1 hour
+          console.log(`Calculated from event duration: ${hours} hours`);
+        } else {
+          hours = 1;
+        }
       }
-      participation.volunteerHours = hours || 1; // Default to 1 hour if not specified
+
+      // Determine maximum allowed hours: event duration in hours + 2 hour buffer
+      let maxAllowed = 24;
+      if (participation.event && participation.event.startDate && participation.event.endDate) {
+        const durationInMs = new Date(participation.event.endDate) - new Date(participation.event.startDate);
+        const durationHours = Math.max(0, Math.round(durationInMs / (1000 * 60 * 60)));
+        maxAllowed = Math.max(1, durationHours + 2);
+      }
+
+      if (hours < 0 || hours > maxAllowed) {
+        return res.status(400).json({ message: `volunteerHours must be between 0 and ${maxAllowed}` });
+      }
+
+      participation.volunteerHours = hours; // set validated hours
       console.log(`Final hours to add: ${participation.volunteerHours}`);
 
       // Add hours to student's total

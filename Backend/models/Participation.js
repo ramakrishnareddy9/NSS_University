@@ -27,6 +27,22 @@ const participationSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
+  // Rejection audit fields (set when a participation is rejected)
+  rejectedAt: {
+    type: Date
+  },
+  rejectedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  // Completion audit fields (set when admin/faculty marks participation as completed)
+  completedAt: {
+    type: Date
+  },
+  completedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
   attendance: {
     type: Boolean,
     default: false

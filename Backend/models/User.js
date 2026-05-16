@@ -37,6 +37,16 @@ const userSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // Academic year in format "YYYY-YY" e.g., "2024-25"
+  academicYear: {
+    type: String,
+    trim: true
+  },
+  // Batch/cohort identifier (can default to academicYear)
+  batch: {
+    type: String,
+    trim: true
+  },
   year: {
     type: String,
     enum: ['1st', '2nd', '3rd', '4th', 'PG'],

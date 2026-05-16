@@ -51,8 +51,7 @@ router.post('/', [
   auth,
   authorize('student'),
   body('participationId').notEmpty().withMessage('Participation ID is required'),
-  body('report').trim().notEmpty().withMessage('Report is required'),
-  body('volunteerHours').isNumeric().withMessage('Valid volunteer hours required'),
+  body('report').trim().notEmpty().withMessage('Report is required')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -61,8 +60,8 @@ router.post('/', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { participationId, report, volunteerHours, evidence } = req.body;
-    console.log('📝 Submitting contribution:', { participationId, volunteerHours, evidenceCount: evidence?.length });
+    const { participationId, report, evidence } = req.body;
+    console.log('📝 Submitting contribution:', { participationId, evidenceCount: evidence?.length });
 
     // Verify participation belongs to student and is attended
     const participation = await Participation.findById(participationId)
@@ -86,22 +85,25 @@ router.post('/', [
       return res.status(400).json({ message: 'Contribution already submitted for this event' });
     }
 
-    // Create contribution
+    // Use volunteer hours recorded on the participation (admin-set during attendance)
+    const recordedHours = participation.volunteerHours || 0;
+
+    // Create contribution (do NOT accept volunteerHours from the student request)
     const contribution = new Contribution({
       student: req.user.id,
       event: participation.event._id,
       participation: participationId,
       report,
-      volunteerHours: parseFloat(volunteerHours),
+      volunteerHours: parseFloat(recordedHours),
       evidence: evidence || []
     });
 
     await contribution.save();
 
-    // Update participation
+    // Update participation: link to contribution and mark completed
     participation.status = 'completed';
     participation.contribution = contribution._id;
-    participation.volunteerHours = parseFloat(volunteerHours);
+    // Do NOT overwrite participation.volunteerHours here; it should be set by admin attendance
     await participation.save();
 
     // Add contribution to user's contributions list (hours are added when attendance is marked)

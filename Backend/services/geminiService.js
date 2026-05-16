@@ -268,7 +268,7 @@ Keep the summary professional and concise (300-500 words).
 function getEventsBreakdown(reports) {
   const breakdown = {};
   reports.forEach(r => {
-    const category = r.event?.category || 'Other';
+    const category = r.event?.eventType || r.event?.category || 'Other';
     breakdown[category] = (breakdown[category] || 0) + 1;
   });
   return breakdown;
