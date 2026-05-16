@@ -1,0 +1,45 @@
+{
+  "name": "nss-activity-portal",
+  "version": "1.0.0",
+  "description": "NSS Activity Portal - Web-based system for managing NSS events and student participation",
+  "main": "server.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "nodemon backend/server.js",
+    "client": "cd frontend && npm start",
+    "seed-demo-users": "node backend/scripts/seed-demo-users.js",
+    "install-all": "npm install && cd frontend && npm install"
+  },
+  "keywords": [
+    "nss",
+    "portal",
+    "volunteer",
+    "event-management"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.13.2",
+    "bcryptjs": "^2.4.3",
+    "canvas": "^3.2.0",
+    "cloudinary": "^1.40.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-validator": "^7.0.1",
+    "jsonwebtoken": "^9.0.2",
+    "jspdf": "^2.5.1",
+    "mongoose": "^7.6.0",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.7",
+    "pdf-lib": "^1.17.1",
+    "socket.io": "^4.8.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "nodemon": "^3.0.1"
+  }
+}

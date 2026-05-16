@@ -1,0 +1,358 @@
+/* ========================================
+   LANDING PAGE CSS - SMOOTH ANIMATIONS
+   ======================================== */
+
+/* Container */
+.landing-container {
+  min-height: 100vh;
+  width: 100%;
+  background: linear-gradient(135deg, #eff6ff 0%, #ffffff 50%, #fff7ed 100%);
+}
+
+/* Header */
+.landing-header {
+  background-color: white;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+  border-bottom: 4px solid #f97316;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+/* Feature Cards */
+.feature-card {
+  background: white;
+  border-radius: 1rem;
+  padding: 1.5rem;
+  border-top: 4px solid;
+  position: relative;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.feature-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 1rem;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.feature-card:hover {
+  transform: translateY(-8px);
+}
+
+.feature-card:hover::after {
+  opacity: 1;
+}
+
+.feature-card-blue { border-top-color: #3b82f6; }
+.feature-card-orange { border-top-color: #f97316; }
+.feature-card-green { border-top-color: #10b981; }
+
+/* Feature Icons */
+.feature-icon {
+  width: 3rem;
+  height: 3rem;
+  border-radius: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1rem;
+  transition: transform 0.3s ease;
+}
+
+.feature-icon-blue { background-color: #dbeafe; }
+.feature-icon-orange { background-color: #ffedd5; }
+.feature-icon-green { background-color: #d1fae5; }
+
+.feature-card:hover .feature-icon {
+  transform: scale(1.1) rotate(5deg);
+}
+
+/* CTA Buttons */
+.cta-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 2rem;
+  font-weight: 600;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.cta-button::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255,255,255,0.2), transparent);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.cta-button:hover::before {
+  opacity: 1;
+}
+
+.cta-button:hover {
+  transform: translateY(-2px);
+}
+
+.cta-button:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.cta-primary {
+  background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+  color: white;
+  box-shadow: 0 4px 6px -1px rgba(249, 115, 22, 0.3);
+}
+
+.cta-secondary {
+  background: white;
+  color: #2563eb;
+  border: 2px solid #2563eb;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+}
+
+/* Statistics Section */
+.stats-section {
+  margin-top: 4rem;
+  background-color: white;
+  border-radius: 1rem;
+  padding: 3rem;
+  position: relative;
+  overflow: hidden;
+  border: 2px solid #dbeafe;
+}
+
+.stats-background {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, #eff6ff 0%, #ffedd5 50%, #eff6ff 100%);
+  opacity: 0.5;
+  z-index: 0;
+}
+
+/* Stat Cards */
+.stat-card {
+  padding: 0.75rem 1rem;
+  border-radius: 0.75rem;
+  position: relative;
+  transition: transform 0.3s ease;
+}
+
+@media (min-width: 640px) {
+  .stat-card {
+    padding: 1rem 1.5rem;
+    border-radius: 1rem;
+  }
+}
+
+@media (min-width: 768px) {
+  .stat-card {
+    padding: 1.5rem;
+    border-radius: 1.5rem;
+  }
+}
+
+.stat-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 0.75rem;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.15);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.stat-card:hover {
+  transform: scale(1.05);
+}
+
+.stat-card:hover::after {
+  opacity: 1;
+}
+
+.stat-card-blue {
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+}
+
+.stat-card-green {
+  background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+}
+
+.stat-card-orange {
+  background: linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%);
+}
+
+.stat-card-purple {
+  background: linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%);
+}
+
+/* Progress Bars */
+.stat-progress {
+  margin-top: 0.5rem;
+  height: 0.25rem;
+  background-color: rgba(0, 0, 0, 0.1);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.stat-progress-bar {
+  height: 100%;
+  border-radius: 9999px;
+  animation: progressAnimation 2s ease-out forwards;
+}
+
+@keyframes progressAnimation {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.animate-progress {
+  animation: progressAnimation 2s ease-out forwards;
+}
+
+.stat-progress-blue { background-color: #2563eb; }
+.stat-progress-green { background-color: #059669; }
+.stat-progress-orange { background-color: #ea580c; }
+.stat-progress-purple { background-color: #7c3aed; }
+
+/* Scrolling */
+html {
+  scroll-padding-top: 80px;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+/* Images */
+img {
+  content-visibility: auto;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+}
+
+/* Containment for better performance */
+.feature-card,
+.stat-card {
+  contain: layout style paint;
+}
+
+/* Content visibility for off-screen elements */
+.stats-section,
+.feature-card {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 500px;
+}
+
+/* Mobile-specific enhancements (768px and below) */
+@media (max-width: 768px) {
+  /* Enable smooth scrolling on mobile */
+  html {
+    scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch;
+  }
+  
+  /* Enhanced animations for mobile */
+  .feature-card {
+    transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1),
+                box-shadow 0.4s ease,
+                opacity 0.6s ease;
+    animation: fadeInUp 0.6s ease-out;
+  }
+  
+  .feature-card:hover {
+    transform: translateY(-12px) scale(1.02);
+  }
+  
+  .feature-icon {
+    transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  
+  .feature-card:hover .feature-icon {
+    transform: scale(1.2) rotate(10deg);
+  }
+  
+  .stat-card {
+    transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: fadeInScale 0.8s ease-out;
+  }
+  
+  .stat-card:hover {
+    transform: scale(1.08) rotate(1deg);
+  }
+  
+  .stat-card:nth-child(1) { animation-delay: 0.1s; }
+  .stat-card:nth-child(2) { animation-delay: 0.2s; }
+  .stat-card:nth-child(3) { animation-delay: 0.3s; }
+  .stat-card:nth-child(4) { animation-delay: 0.4s; }
+  
+  .cta-button {
+    transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
+                box-shadow 0.3s ease;
+  }
+  
+  .cta-button:hover {
+    transform: translateY(-4px) scale(1.05);
+  }
+  
+  .cta-button:active {
+    transform: translateY(0) scale(0.95);
+  }
+  
+  /* Mobile-only animations */
+  @keyframes fadeInUp {
+    from {
+      opacity: 0;
+      transform: translateY(30px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  @keyframes fadeInScale {
+    from {
+      opacity: 0;
+      transform: scale(0.8);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  
+  /* Animate progress bars with bounce on mobile */
+  .animate-progress {
+    animation: progressAnimationMobile 2.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  }
+  
+  @keyframes progressAnimationMobile {
+    0% {
+      transform: translateX(-100%);
+    }
+    70% {
+      transform: translateX(5%);
+    }
+    100% {
+      transform: translateX(0);
+    }
+  }
+}
