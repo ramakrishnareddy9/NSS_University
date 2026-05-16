@@ -10,6 +10,22 @@ const { sendContributionVerified } = require('../utils/notifications');
 
 const router = express.Router();
 
+function getScheduledVolunteerHours(event) {
+  if (!event || !event.startDate || !event.endDate) {
+    return 0;
+  }
+
+  const startDate = new Date(event.startDate);
+  const endDate = new Date(event.endDate);
+  const durationInMs = endDate - startDate;
+
+  if (Number.isNaN(durationInMs) || durationInMs <= 0) {
+    return 0;
+  }
+
+  return Math.round((durationInMs / (1000 * 60 * 60)) * 100) / 100;
+}
+
 // @route   GET /api/contributions
 // @desc    Get all contributions
 // @access  Private
@@ -44,10 +60,10 @@ router.get('/', auth, async (req, res) => {
       .skip(skip)
       .limit(limit);
 
-    res.json(buildPagedResponse(contributions, total, page, limit));
+    res.json({ success: true, ...buildPagedResponse(contributions, total, page, limit) });
   } catch (error) {
     console.error('Get contributions error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -64,36 +80,40 @@ router.post('/', [
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       console.error('Contribution validation errors:', errors.array());
-      return res.status(400).json({ errors: errors.array() });
+      return res.status(400).json({ success: false, errors: errors.array() });
     }
 
     const { participationId, report, evidence } = req.body;
     console.log('📝 Submitting contribution:', { participationId, evidenceCount: evidence?.length });
+
+    if (typeof req.body.volunteerHours !== 'undefined') {
+      return res.status(400).json({ success: false, message: 'Volunteer hours are calculated automatically from the event schedule.' });
+    }
 
     // Verify participation belongs to student and is attended
     const participation = await Participation.findById(participationId)
       .populate('event');
 
     if (!participation) {
-      return res.status(404).json({ message: 'Participation not found' });
+      return res.status(404).json({ success: false, message: 'Participation not found' });
     }
 
     if (participation.student.toString() !== req.user.id) {
-      return res.status(403).json({ message: 'Not authorized' });
+      return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
     if (participation.status !== 'attended' && participation.status !== 'completed') {
-      return res.status(400).json({ message: 'Participation must be attended or completed' });
+      return res.status(400).json({ success: false, message: 'Participation must be attended or completed' });
     }
 
     // Check if contribution already exists
     const existingContribution = await Contribution.findOne({ participation: participationId });
     if (existingContribution) {
-      return res.status(400).json({ message: 'Contribution already submitted for this event' });
+      return res.status(400).json({ success: false, message: 'Contribution already submitted for this event' });
     }
 
-    // Use volunteer hours recorded on the participation (admin-set during attendance)
-    const recordedHours = participation.volunteerHours || 0;
+    // Use volunteer hours recorded on the participation or derive them from the event schedule.
+    const recordedHours = participation.volunteerHours || getScheduledVolunteerHours(participation.event);
 
     // Create contribution (do NOT accept volunteerHours from the student request)
     const contribution = new Contribution({
@@ -122,10 +142,10 @@ router.post('/', [
     await contribution.populate('event', 'title eventType');
     await contribution.populate('participation');
 
-    res.status(201).json(contribution);
+    res.status(201).json({ success: true, data: contribution });
   } catch (error) {
     console.error('Submit contribution error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -137,7 +157,7 @@ router.put('/:id/verify', [auth, authorize('admin', 'faculty'), validateObjectId
     const contribution = await Contribution.findById(req.params.id);
 
     if (!contribution) {
-      return res.status(404).json({ message: 'Contribution not found' });
+      return res.status(404).json({ success: false, message: 'Contribution not found' });
     }
 
     contribution.isVerified = true;
@@ -157,10 +177,10 @@ router.put('/:id/verify', [auth, authorize('admin', 'faculty'), validateObjectId
       console.error('Failed to send contribution verification email:', error);
     }
 
-    res.json(contribution);
+    res.json({ success: true, data: contribution });
   } catch (error) {
     console.error('Verify contribution error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 

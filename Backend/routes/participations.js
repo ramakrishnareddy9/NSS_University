@@ -13,6 +13,36 @@ const { getPagination, buildPagedResponse } = require('../utils/pagination');
 
 const router = express.Router();
 
+const VOLUNTEER_HOURS_BUFFER_MS = 15 * 60 * 1000;
+
+function getEventVolunteerHours(event) {
+  if (!event || !event.startDate || !event.endDate) {
+    return {
+      durationHours: 0,
+      maxAllowedHours: 0.25
+    };
+  }
+
+  const startDate = new Date(event.startDate);
+  const endDate = new Date(event.endDate);
+  const durationInMs = endDate - startDate;
+
+  if (Number.isNaN(durationInMs) || durationInMs <= 0) {
+    return {
+      durationHours: 0,
+      maxAllowedHours: 0.25
+    };
+  }
+
+  const durationHours = Math.round((durationInMs / (1000 * 60 * 60)) * 100) / 100;
+  const maxAllowedHours = Math.round(((durationInMs + VOLUNTEER_HOURS_BUFFER_MS) / (1000 * 60 * 60)) * 100) / 100;
+
+  return {
+    durationHours,
+    maxAllowedHours
+  };
+}
+
 // @route   GET /api/participations
 // @desc    Get all participations (filtered by role)
 // @access  Private
@@ -372,7 +402,6 @@ router.put('/:id/reject', [auth, authorize('admin', 'faculty'), validateObjectId
 // @access  Private (Admin/Faculty only)
 router.put('/:id/complete', [auth, authorize('admin', 'faculty'), validateObjectId('id')], async (req, res) => {
   try {
-    const { volunteerHours } = req.body;
     let participation = await Participation.findById(req.params.id)
       .populate('student', 'totalVolunteerHours name email')
       .populate('event', 'startDate endDate title');
@@ -390,46 +419,51 @@ router.put('/:id/complete', [auth, authorize('admin', 'faculty'), validateObject
     }
 
     const session = await mongoose.startSession();
+    let auditPayload = null;
     try {
+
       await session.withTransaction(async () => {
         const participationInTxn = await Participation.findById(participation._id)
           .populate('student', 'totalVolunteerHours name email')
           .session(session);
+        const student = await User.findById(participationInTxn.student._id || participationInTxn.student).session(session);
+        const { durationHours, maxAllowedHours } = getEventVolunteerHours(participationInTxn.event);
+        const calculatedHours = Math.min(durationHours, maxAllowedHours);
+        const oldHours = participationInTxn.volunteerHours || 0;
+        const delta = calculatedHours - oldHours;
 
         // Set completed audit fields
         participationInTxn.status = 'completed';
         participationInTxn.completedAt = new Date();
         participationInTxn.completedBy = req.user.id;
 
-        // If admin provided volunteerHours, validate against event duration cap and update student's totals accordingly
-        if (typeof volunteerHours !== 'undefined') {
-          const newHours = Number(volunteerHours) || 0;
-          const oldHours = participationInTxn.volunteerHours || 0;
+        participationInTxn.volunteerHours = calculatedHours;
 
-          // Determine maximum allowed hours: event duration in hours + 2 hour buffer
-          let maxAllowed = 24; // sensible default cap
-          if (participationInTxn.event && participationInTxn.event.startDate && participationInTxn.event.endDate) {
-            const durationInMs = new Date(participationInTxn.event.endDate) - new Date(participationInTxn.event.startDate);
-            const durationHours = Math.max(0, Math.round(durationInMs / (1000 * 60 * 60)));
-            maxAllowed = Math.max(1, durationHours + 2);
-          }
+        if (student && delta !== 0) {
+          const oldTotal = student.totalVolunteerHours || 0;
+          student.totalVolunteerHours = Math.max(0, oldTotal + delta);
+          await student.save({ session });
 
-          if (newHours < 0 || newHours > maxAllowed) {
-            const error = new Error(`volunteerHours must be between 0 and ${maxAllowed}`);
-            error.statusCode = 400;
-            throw error;
-          }
-
-          const delta = newHours - oldHours;
-          participationInTxn.volunteerHours = newHours;
-
-          if (delta !== 0) {
-            const student = await User.findById(participationInTxn.student._id || participationInTxn.student).session(session);
-            if (student) {
-              student.totalVolunteerHours = Math.max(0, (student.totalVolunteerHours || 0) + delta);
-              await student.save({ session });
+          auditPayload = {
+            action: 'participation_completed_hours_calculated',
+            actor: req.user._id,
+            targetModel: 'Participation',
+            targetId: participationInTxn._id,
+            details: {
+              eventId: participationInTxn.event?._id || participationInTxn.event,
+              studentId: participationInTxn.student?._id || participationInTxn.student,
+              oldVolunteerHours: oldHours,
+              newVolunteerHours: calculatedHours,
+              delta,
+              eventDurationHours: durationHours,
+              maxAllowedHours,
+              bufferMinutes: 15,
+              studentTotalVolunteerHoursBefore: oldTotal,
+              studentTotalVolunteerHoursAfter: student.totalVolunteerHours,
+              source: 'event-schedule',
+              timestamp: new Date()
             }
-          }
+          };
         }
 
         await participationInTxn.save({ session });
@@ -446,6 +480,14 @@ router.put('/:id/complete', [auth, authorize('admin', 'faculty'), validateObject
     participation = await Participation.findById(participation._id)
       .populate('student', 'name email studentId totalVolunteerHours')
       .populate('event', 'title eventType startDate endDate');
+
+    if (auditPayload) {
+      try {
+        await AuditLog.create(auditPayload);
+      } catch (logErr) {
+        console.error('Failed to write AuditLog for completion hours calculation:', logErr);
+      }
+    }
 
     // Emit socket event
     try {
@@ -479,11 +521,14 @@ router.put('/:id/complete', [auth, authorize('admin', 'faculty'), validateObject
 // @access  Private (Admin/Faculty only)
 router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObjectId('id')], async (req, res) => {
   try {
-    const { attended, volunteerHours } = req.body;
+    const { attended } = req.body;
     console.log('\n🎯 === ATTENDANCE MARKING REQUEST ===');
     console.log('Participation ID:', req.params.id);
     console.log('Attended:', attended);
-    console.log('Volunteer Hours (from request):', volunteerHours);
+
+    if (typeof req.body.volunteerHours !== 'undefined') {
+      console.warn('Ignoring client-supplied volunteerHours; hours are calculated from the event schedule.');
+    }
 
     let participation = await Participation.findById(req.params.id)
       .populate('event')
@@ -533,6 +578,7 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
     console.log('Event:', participation.event.title);
 
     const session = await mongoose.startSession();
+    let auditPayload = null;
     try {
       await session.withTransaction(async () => {
         const participationInTxn = await Participation.findById(participation._id)
@@ -541,6 +587,8 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
           .session(session);
 
         const wasAttended = participationInTxn.attendance;
+        const oldHours = participationInTxn.volunteerHours || 0;
+        const student = await User.findById(participationInTxn.student._id || participationInTxn.student).session(session);
         participationInTxn.attendance = attended;
         participationInTxn.attendanceDate = attended ? new Date() : null;
         participationInTxn.status = attended ? 'attended' : participationInTxn.status;
@@ -548,56 +596,46 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
         // Calculate volunteer hours if marking as attended
         if (attended && !wasAttended) {
           console.log('\n📊 Calculating volunteer hours...');
-          // Use provided hours or calculate from event duration
-          let hours = typeof volunteerHours !== 'undefined' ? Number(volunteerHours) : undefined;
-          if (typeof hours === 'undefined' || Number.isNaN(hours)) {
-            if (participationInTxn.event) {
-              // Calculate hours from event start and end date (in hours)
-              const startDate = new Date(participationInTxn.event.startDate);
-              const endDate = new Date(participationInTxn.event.endDate);
-              const durationInMs = endDate - startDate;
-              hours = Math.max(1, Math.round(durationInMs / (1000 * 60 * 60))); // Convert to hours, minimum 1 hour
-              console.log(`Calculated from event duration: ${hours} hours`);
-            } else {
-              hours = 1;
-            }
-          }
-
-          // Determine maximum allowed hours: event duration in hours + 2 hour buffer
-          let maxAllowed = 24;
-          if (participationInTxn.event && participationInTxn.event.startDate && participationInTxn.event.endDate) {
-            const durationInMs = new Date(participationInTxn.event.endDate) - new Date(participationInTxn.event.startDate);
-            const durationHours = Math.max(0, Math.round(durationInMs / (1000 * 60 * 60)));
-            maxAllowed = Math.max(1, durationHours + 2);
-          }
-
-          if (hours < 0 || hours > maxAllowed) {
-            const error = new Error(`volunteerHours must be between 0 and ${maxAllowed}`);
-            error.statusCode = 400;
-            throw error;
-          }
-
-          participationInTxn.volunteerHours = hours; // set validated hours
+          const { durationHours, maxAllowedHours } = getEventVolunteerHours(participationInTxn.event);
+          const hours = Math.min(durationHours, maxAllowedHours);
+          participationInTxn.volunteerHours = hours;
           console.log(`Final hours to add: ${participationInTxn.volunteerHours}`);
 
-          // Add hours to student's total
-          const student = await User.findById(participationInTxn.student._id || participationInTxn.student).session(session);
           if (student) {
             const oldTotal = student.totalVolunteerHours || 0;
-            student.totalVolunteerHours = oldTotal + participationInTxn.volunteerHours;
+            student.totalVolunteerHours = Math.max(0, oldTotal + participationInTxn.volunteerHours);
             await student.save({ session });
             console.log(`✅ HOURS UPDATED!`);
             console.log(`   Student: ${student.name}`);
             console.log(`   Previous Total: ${oldTotal} hours`);
             console.log(`   Added: ${participationInTxn.volunteerHours} hours`);
             console.log(`   New Total: ${student.totalVolunteerHours} hours`);
-          } else {
-            console.log('❌ ERROR: Student not found!');
+
+            auditPayload = {
+              action: 'attendance_hours_calculated',
+              actor: req.user._id,
+              targetModel: 'Participation',
+              targetId: participationInTxn._id,
+              details: {
+                eventId: participationInTxn.event?._id || participationInTxn.event,
+                studentId: participationInTxn.student?._id || participationInTxn.student,
+                attendance: true,
+                oldVolunteerHours: oldHours,
+                newVolunteerHours: participationInTxn.volunteerHours,
+                delta: participationInTxn.volunteerHours - oldHours,
+                eventDurationHours: durationHours,
+                maxAllowedHours,
+                bufferMinutes: 15,
+                manualVolunteerHoursIgnored: typeof req.body.volunteerHours !== 'undefined',
+                studentTotalVolunteerHoursBefore: oldTotal,
+                studentTotalVolunteerHoursAfter: student.totalVolunteerHours,
+                timestamp: new Date()
+              }
+            };
           }
         } else if (!attended && wasAttended) {
           console.log('\n⚠️ Unmarking attendance - removing hours...');
           // If unmarking attendance, subtract the hours
-          const student = await User.findById(participationInTxn.student._id || participationInTxn.student).session(session);
           if (student && participationInTxn.volunteerHours) {
             const oldTotal = student.totalVolunteerHours || 0;
             student.totalVolunteerHours = Math.max(0, oldTotal - participationInTxn.volunteerHours);
@@ -607,6 +645,25 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
             console.log(`   Previous Total: ${oldTotal} hours`);
             console.log(`   Removed: ${participationInTxn.volunteerHours} hours`);
             console.log(`   New Total: ${student.totalVolunteerHours} hours`);
+
+            auditPayload = {
+              action: 'attendance_hours_reversed',
+              actor: req.user._id,
+              targetModel: 'Participation',
+              targetId: participationInTxn._id,
+              details: {
+                eventId: participationInTxn.event?._id || participationInTxn.event,
+                studentId: participationInTxn.student?._id || participationInTxn.student,
+                attendance: false,
+                oldVolunteerHours: oldHours,
+                newVolunteerHours: 0,
+                delta: -participationInTxn.volunteerHours,
+                manualVolunteerHoursIgnored: typeof req.body.volunteerHours !== 'undefined',
+                studentTotalVolunteerHoursBefore: oldTotal,
+                studentTotalVolunteerHoursAfter: student.totalVolunteerHours,
+                timestamp: new Date()
+              }
+            };
           }
           participationInTxn.volunteerHours = 0;
         } else {
@@ -629,24 +686,12 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
       .populate('student', 'name email studentId totalVolunteerHours')
       .populate('event', 'title eventType');
 
-    // Record audit log for attendance changes
-    try {
-      await AuditLog.create({
-        action: attended ? 'attendance_marked' : 'attendance_unmarked',
-        actor: req.user._id,
-        targetModel: 'Participation',
-        targetId: participation._id,
-        details: {
-          eventId: participation.event._id,
-          studentId: participation.student._id,
-          attendance: participation.attendance,
-          volunteerHours: participation.volunteerHours,
-          timestamp: new Date(),
-          forced: req.body.force === true || req.body.force === 'true' || false
-        }
-      });
-    } catch (logErr) {
-      console.error('Failed to write AuditLog for attendance change:', logErr);
+    if (auditPayload) {
+      try {
+        await AuditLog.create(auditPayload);
+      } catch (logErr) {
+        console.error('Failed to write AuditLog for attendance hours update:', logErr);
+      }
     }
 
     await participation.populate('student', 'name email studentId totalVolunteerHours');

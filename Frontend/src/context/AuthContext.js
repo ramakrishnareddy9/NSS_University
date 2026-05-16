@@ -4,6 +4,8 @@ import toast from 'react-hot-toast';
 
 const AuthContext = createContext();
 
+const extractPayload = (response) => response?.data?.data ?? response?.data ?? {};
+
 export const useAuth = () => {
   const context = useContext(AuthContext);
   if (!context) {
@@ -52,7 +54,8 @@ export const AuthProvider = ({ children }) => {
   const login = async (email, password) => {
     try {
       const response = await api.post('/auth/login', { email, password });
-      const { token: newToken, user: userData } = response.data;
+      const payload = extractPayload(response);
+      const { token: newToken, user: userData } = payload;
       
       localStorage.setItem('token', newToken);
       localStorage.setItem('user', JSON.stringify(userData));
@@ -72,18 +75,35 @@ export const AuthProvider = ({ children }) => {
   const register = async (userData) => {
     try {
       const response = await api.post('/auth/register', userData);
-      const { token: newToken, user: userDataResponse } = response.data;
+      const payload = extractPayload(response);
       
-      localStorage.setItem('token', newToken);
-      localStorage.setItem('user', JSON.stringify(userDataResponse));
-      setToken(newToken);
-      setUser(userDataResponse);
-      
-      toast.success('Registration successful!');
-      return { success: true, user: userDataResponse };
+      toast.success(response.data?.message || 'Registration successful!');
+      return { success: true, data: payload };
     } catch (error) {
       console.error('Registration error:', error);
       const message = error.response?.data?.message || 'Registration failed. Please try again.';
+      toast.error(message);
+      return { success: false, error: message };
+    }
+  };
+
+  const verifyEmail = async (email, otp) => {
+    try {
+      const response = await api.post('/auth/verify-email', { email, otp });
+      const payload = extractPayload(response);
+      const { token: newToken, user: userData } = payload;
+
+      localStorage.setItem('token', newToken);
+      localStorage.setItem('user', JSON.stringify(userData));
+      localStorage.removeItem('pendingVerificationEmail');
+      setToken(newToken);
+      setUser(userData);
+
+      toast.success(response.data?.message || 'Email verified successfully!');
+      return { success: true, data: payload };
+    } catch (error) {
+      console.error('Verify email error:', error);
+      const message = error.response?.data?.message || 'Email verification failed. Please try again.';
       toast.error(message);
       return { success: false, error: message };
     }
@@ -109,6 +129,7 @@ export const AuthProvider = ({ children }) => {
     token,
     login,
     register,
+    verifyEmail,
     logout,
     updateUser,
     isAuthenticated: !!user && !!token,

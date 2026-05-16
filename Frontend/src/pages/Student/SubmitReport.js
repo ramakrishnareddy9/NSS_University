@@ -38,7 +38,8 @@ const SubmitReport = () => {
       setEvent(response.data);
       setFormData(prev => ({
         ...prev,
-        title: `${response.data.title} - Event Report`
+        title: `${response.data.title} - Event Report`,
+        academicYear: response.data.academicYear || prev.academicYear
       }));
     } catch (error) {
       toast.error('Failed to load event details');
@@ -258,16 +259,9 @@ const SubmitReport = () => {
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Academic Year
               </label>
-              <select
-                value={formData.academicYear}
-                onChange={(e) => setFormData({ ...formData, academicYear: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
-              >
-                <option value="2024">2024-2025</option>
-                <option value="2023">2023-2024</option>
-                <option value="2022">2022-2023</option>
-              </select>
+              <div className="w-full px-4 py-2 border border-gray-200 rounded-lg bg-gray-50 text-gray-700">
+                {formData.academicYear || 'Assigned from the selected event'}
+              </div>
             </div>
 
             {/* Description */}

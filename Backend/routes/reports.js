@@ -12,6 +12,7 @@ const Report = require('../models/Report');
 const { auth, authorize } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
 const { analyzeStudentReport, generateConsolidatedReport, generateEventSummary } = require('../services/geminiService');
+const { resolveAcademicYearContext } = require('../utils/academicYear');
 
 function addWrappedText(doc, text, startY, options = {}) {
   const {
@@ -241,25 +242,6 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
   try {
     const { year, academicYear, startMonth, endMonth } = req.query;
 
-    const buildAcademicRange = (academicYearValue) => {
-      const match = /^\s*(\d{4})-(\d{2})\s*$/.exec(String(academicYearValue || ''));
-      if (!match) {
-        return null;
-      }
-
-      const startYear = parseInt(match[1], 10);
-      const endYear = startYear + 1;
-      const expectedEndSuffix = String(endYear).slice(-2);
-
-      if (match[2] !== expectedEndSuffix) {
-        return null;
-      }
-
-      const rangeStart = new Date(startYear, 5, 1, 0, 0, 0, 0); // June 1
-      const rangeEnd = new Date(endYear, 4, 31, 23, 59, 59, 999); // May 31
-      return { rangeStart, rangeEnd, label: academicYearValue };
-    };
-
     const buildMonthRange = (yearValue, startMonthValue, endMonthValue) => {
       const reportYear = parseInt(yearValue, 10);
       const start = parseInt(startMonthValue, 10);
@@ -282,8 +264,8 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
       return { rangeStart, rangeEnd, label: `${reportYear}-${String(start).padStart(2, '0')}-${String(end).padStart(2, '0')}` };
     };
 
-    const academicRange = academicYear ? buildAcademicRange(academicYear) : null;
-    const monthRange = !academicRange && startMonth && endMonth ? buildMonthRange(year || new Date().getFullYear(), startMonth, endMonth) : null;
+    const academicContext = academicYear || year ? await resolveAcademicYearContext(academicYear || year) : null;
+    const monthRange = !academicContext && startMonth && endMonth ? buildMonthRange(year || new Date().getFullYear(), startMonth, endMonth) : null;
     const fallbackYear = year || new Date().getFullYear();
     const defaultRange = {
       rangeStart: new Date(`${fallbackYear}-01-01T00:00:00.000Z`),
@@ -291,20 +273,20 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
       label: String(fallbackYear)
     };
 
-    const selectedRange = academicRange || monthRange || defaultRange;
+    const selectedRange = academicContext || monthRange || defaultRange;
     const { rangeStart, rangeEnd, label } = selectedRange;
 
-    // Get all events for the year
     const events = await Event.find({
-      startDate: { $gte: rangeStart, $lte: rangeEnd }
+      $or: [
+        { academicYear: label },
+        { startDate: { $gte: rangeStart, $lte: rangeEnd } }
+      ]
     });
 
-    // Get all participations
     const participations = await Participation.find({
       createdAt: { $gte: rangeStart, $lte: rangeEnd }
     }).populate('student', 'name email studentId department year');
 
-    // Get all contributions
     const contributions = await Contribution.find({
       submittedAt: { $gte: rangeStart, $lte: rangeEnd }
     }).populate('student', 'name email studentId');
@@ -466,12 +448,20 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
 // @access  Private (Student)
 router.post('/student/submit', [auth, authorize('student'), upload.array('files', 5)], async (req, res) => {
   try {
-    const { eventId, title, description, academicYear } = req.body;
+    const { eventId, title, description } = req.body;
 
     // Verify event exists
     const event = await Event.findById(eventId);
     if (!event) {
       return res.status(404).json({ message: 'Event not found' });
+    }
+
+    const academicYearContext = await resolveAcademicYearContext(event.academicYear, event.startDate);
+    const academicYear = event.academicYear || academicYearContext.label;
+
+    if (!event.academicYear) {
+      event.academicYear = academicYear;
+      await event.save();
     }
 
     // Verify student participated in the event
@@ -558,7 +548,7 @@ router.post('/student/submit', [auth, authorize('student'), upload.array('files'
       title,
       description,
       files: uploadedFiles,
-      academicYear: academicYear || new Date().getFullYear().toString(),
+      academicYear,
       status: 'submitted'
     });
 
@@ -621,7 +611,9 @@ router.get('/admin/all', [auth, authorize('admin', 'faculty')], async (req, res)
     
     const query = {};
     if (eventId) query.event = eventId;
-    if (academicYear) query.academicYear = academicYear;
+    if (academicYear) {
+      query.academicYear = (await resolveAcademicYearContext(academicYear)).label;
+    }
     if (status) query.status = status;
 
     const reports = await Report.find(query)
@@ -688,9 +680,11 @@ router.post('/admin/generate-naac', [auth, authorize('admin')], async (req, res)
       return res.status(400).json({ message: 'Academic year is required' });
     }
 
+    const resolvedAcademicYear = (await resolveAcademicYearContext(academicYear)).label;
+
     // Fetch all approved reports for the academic year
     const reports = await Report.find({
-      academicYear,
+      academicYear: resolvedAcademicYear,
       status: { $in: ['submitted', 'reviewed', 'approved'] }
     })
       .populate('student', 'name email studentId department')
@@ -700,9 +694,9 @@ router.post('/admin/generate-naac', [auth, authorize('admin')], async (req, res)
       return res.status(404).json({ message: 'No reports found for this academic year' });
     }
 
-    console.log(`📊 Generating NAAC report for ${academicYear} with ${reports.length} reports...`);
+    console.log(`📊 Generating NAAC report for ${resolvedAcademicYear} with ${reports.length} reports...`);
 
-    const naacReport = await generateConsolidatedReport(reports, academicYear, 'NAAC');
+    const naacReport = await generateConsolidatedReport(reports, resolvedAcademicYear, 'NAAC');
 
     res.json({
       message: 'NAAC report generated successfully',
@@ -729,8 +723,10 @@ router.post('/admin/generate-ugc', [auth, authorize('admin')], async (req, res) 
       return res.status(400).json({ message: 'Academic year is required' });
     }
 
+    const resolvedAcademicYear = (await resolveAcademicYearContext(academicYear)).label;
+
     const reports = await Report.find({
-      academicYear,
+      academicYear: resolvedAcademicYear,
       status: { $in: ['submitted', 'reviewed', 'approved'] }
     })
       .populate('student', 'name email studentId department')
@@ -740,9 +736,9 @@ router.post('/admin/generate-ugc', [auth, authorize('admin')], async (req, res) 
       return res.status(404).json({ message: 'No reports found for this academic year' });
     }
 
-    console.log(`📊 Generating UGC report for ${academicYear} with ${reports.length} reports...`);
+    console.log(`📊 Generating UGC report for ${resolvedAcademicYear} with ${reports.length} reports...`);
 
-    const ugcReport = await generateConsolidatedReport(reports, academicYear, 'UGC');
+    const ugcReport = await generateConsolidatedReport(reports, resolvedAcademicYear, 'UGC');
 
     res.json({
       message: 'UGC report generated successfully',
@@ -753,160 +749,6 @@ router.post('/admin/generate-ugc', [auth, authorize('admin')], async (req, res) 
     const status = error.statusCode || 500;
     res.status(status).json({
       message: error.clientMessage || error.message || 'Failed to generate UGC report',
-      details: process.env.NODE_ENV !== 'production' ? error.details : undefined
-    });
-  }
-});
-
-// @route   POST /api/reports/admin/consolidated-pdf
-// @desc    Generate consolidated AI report PDF and upload to Cloudinary
-// @access  Private (Admin/Faculty)
-router.post('/admin/consolidated-pdf', [auth, authorize('admin', 'faculty')], async (req, res) => {
-  try {
-    const { academicYear, reportType = 'NAAC', content, statistics, totals } = req.body;
-
-    if (!academicYear) {
-      return res.status(400).json({ message: 'Academic year is required' });
-    }
-
-    const normalizedType = reportType.toUpperCase();
-    if (!['NAAC', 'UGC', 'CUSTOM'].includes(normalizedType)) {
-      return res.status(400).json({ message: 'Invalid report type' });
-    }
-
-    let consolidated;
-
-    if (content) {
-      consolidated = {
-        reportType: normalizedType,
-        academicYear,
-        totalEvents: totals?.events ?? 0,
-        totalReports: totals?.reports ?? 0,
-        totalStudents: totals?.students ?? 0,
-        generatedAt: totals?.generatedAt ? new Date(totals.generatedAt) : new Date(),
-        content,
-        statistics: statistics || {}
-      };
-    } else {
-      const reports = await Report.find({
-        academicYear,
-        status: { $in: ['submitted', 'reviewed', 'approved'] }
-      })
-        .populate('student', 'name email studentId department')
-        .populate('event', 'title startDate endDate location category eventType');
-
-      if (reports.length === 0) {
-        return res.status(404).json({ message: 'No reports found for this academic year' });
-      }
-
-      consolidated = await generateConsolidatedReport(reports, academicYear, normalizedType);
-    }
-
-    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
-    const pageWidth = doc.internal.pageSize.getWidth();
-    const pageHeight = doc.internal.pageSize.getHeight();
-    const marginX = 18;
-    let cursorY = 20;
-
-    const ensureSpace = (height) => {
-      if (cursorY + height > pageHeight - 20) {
-        doc.addPage();
-        cursorY = 20;
-      }
-    };
-
-    const addHeading = (text, size = 16, spacing = 8) => {
-      ensureSpace(spacing + size / 2);
-      doc.setFontSize(size);
-      doc.setFont(undefined, 'bold');
-      doc.text(text, pageWidth / 2, cursorY, { align: 'center' });
-      cursorY += spacing;
-      doc.setFont(undefined, 'normal');
-    };
-
-    const addSubHeading = (text, size = 13, spacing = 6) => {
-      ensureSpace(spacing + size / 2);
-      doc.setFontSize(size);
-      doc.setFont(undefined, 'bold');
-      doc.text(text, marginX, cursorY);
-      cursorY += spacing;
-      doc.setFont(undefined, 'normal');
-    };
-
-    const addParagraph = (text, size = 11, spacing = 5) => {
-      if (!text) return;
-      doc.setFontSize(size);
-      const maxWidth = pageWidth - marginX * 2;
-      const lines = doc.splitTextToSize(text.trim(), maxWidth);
-      lines.forEach(line => {
-        ensureSpace(spacing);
-        doc.text(line, marginX, cursorY);
-        cursorY += spacing;
-      });
-      cursorY += 2;
-    };
-
-    // Header
-    addHeading(`NSS ${normalizedType} Report`, 20, 12);
-    addParagraph(`Academic Year: ${academicYear}-${parseInt(academicYear, 10) + 1}`);
-    addParagraph(`Generated On: ${new Date(consolidated.generatedAt).toLocaleString()}`);
-    addParagraph(`Total Events: ${consolidated.totalEvents || 0}   |   Total Reports: ${consolidated.totalReports || 0}   |   Students Participated: ${consolidated.totalStudents || 0}`);
-
-    // Statistics Section
-    addSubHeading('Key Metrics');
-    if (consolidated.statistics?.eventsBreakdown) {
-      Object.entries(consolidated.statistics.eventsBreakdown).forEach(([key, value]) => {
-        addParagraph(`${key}: ${value}`);
-      });
-    }
-
-    if (consolidated.statistics?.impactMetrics) {
-      const { totalVolunteerHours, estimatedBeneficiaries, averageReportLength } = consolidated.statistics.impactMetrics;
-      if (typeof totalVolunteerHours !== 'undefined') {
-        addParagraph(`Total Volunteer Hours: ${totalVolunteerHours}`);
-      }
-      if (typeof estimatedBeneficiaries !== 'undefined') {
-        addParagraph(`Estimated Beneficiaries: ${estimatedBeneficiaries}`);
-      }
-      if (typeof averageReportLength !== 'undefined') {
-        addParagraph(`Average Report Length: ${averageReportLength} characters`);
-      }
-    }
-
-    // Main Content
-    addSubHeading('AI Consolidated Report');
-    consolidated.content.split('\n').forEach((block) => {
-      if (block.trim().length === 0) {
-        cursorY += 3;
-        return;
-      }
-      addParagraph(block, 11, 5);
-    });
-
-    const pdfBuffer = Buffer.from(doc.output('arraybuffer'));
-
-    try {
-      const dataUri = `data:application/pdf;base64,${pdfBuffer.toString('base64')}`;
-      const uploadResult = await cloudinary.uploader.upload(dataUri, {
-        folder: `nss-reports/consolidated/${academicYear}`,
-        public_id: `${normalizedType.toLowerCase()}-${Date.now()}`,
-        resource_type: 'raw'
-      });
-      if (uploadResult?.secure_url) {
-        res.setHeader('X-Cloudinary-URL', uploadResult.secure_url);
-      }
-    } catch (uploadError) {
-      console.error('Upload consolidated PDF error:', uploadError.message);
-    }
-
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${normalizedType.toLowerCase()}-report-${academicYear}.pdf"`);
-    res.send(pdfBuffer);
-  } catch (error) {
-    console.error('Generate consolidated PDF error:', error.cause || error);
-    const status = error.statusCode || 500;
-    res.status(status).json({
-      message: error.clientMessage || error.message || 'Failed to generate consolidated PDF',
       details: process.env.NODE_ENV !== 'production' ? error.details : undefined
     });
   }
@@ -1178,10 +1020,12 @@ router.post('/admin/consolidated-pdf', [auth, authorize('admin')], async (req, r
       return res.status(400).json({ message: 'Academic year is required' });
     }
 
+    const resolvedAcademicYear = (await resolveAcademicYearContext(academicYear)).label;
+
     const normalizedType = typeof reportType === 'string' ? reportType.toUpperCase() : 'NAAC';
 
     const reports = await Report.find({
-      academicYear,
+      academicYear: resolvedAcademicYear,
       status: { $in: ['submitted', 'reviewed', 'approved'] }
     })
       .populate('student', 'name studentId department')
@@ -1191,7 +1035,7 @@ router.post('/admin/consolidated-pdf', [auth, authorize('admin')], async (req, r
       return res.status(404).json({ message: 'No reports found for the selected academic year' });
     }
 
-    const consolidatedReport = await generateConsolidatedReport(reports, academicYear, normalizedType);
+    const consolidatedReport = await generateConsolidatedReport(reports, resolvedAcademicYear, normalizedType);
 
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -1202,7 +1046,7 @@ router.post('/admin/consolidated-pdf', [auth, authorize('admin')], async (req, r
     doc.setFontSize(12);
     let cursorY = 32;
     const stats = [
-      `Academic Year: ${academicYear}-${parseInt(academicYear, 10) + 1}`,
+      `Academic Year: ${resolvedAcademicYear}`,
       `Total Events: ${consolidatedReport.totalEvents}`,
       `Total Reports Analyzed: ${consolidatedReport.totalReports}`,
       `Total Students Participated: ${consolidatedReport.totalStudents}`,
@@ -1259,12 +1103,12 @@ router.post('/admin/consolidated-pdf', [auth, authorize('admin')], async (req, r
       {
         folder: 'nss-consolidated-reports',
         resource_type: 'raw',
-        public_id: `${normalizedType.toLowerCase()}-report-${academicYear}-${Date.now()}`
+        public_id: `${normalizedType.toLowerCase()}-report-${resolvedAcademicYear}-${Date.now()}`
       }
     );
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${normalizedType.toLowerCase()}-report-${academicYear}.pdf"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${normalizedType.toLowerCase()}-report-${resolvedAcademicYear}.pdf"`);
     res.setHeader('X-Cloudinary-Url', uploadResult.secure_url);
     res.send(pdfBuffer);
   } catch (error) {

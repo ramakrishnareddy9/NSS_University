@@ -2,6 +2,8 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const { auth, authorize } = require('../middleware/auth');
+const { sendPasswordEmail, generateOTP, sendEmail } = require('../utils/notifications');
+const { isInstitutionalEmail } = require('../utils/emailPolicy');
 
 const router = express.Router();
 
@@ -13,47 +15,61 @@ router.post('/invite', [
   authorize('admin'),
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Please provide a valid email'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
   body('role').isIn(['admin', 'faculty']).withMessage('Role must be admin or faculty'),
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+      return res.status(400).json({ success: false, errors: errors.array() });
     }
 
-    const { name, email, password, role, phone, department } = req.body;
+    const { name, email, role, phone, department } = req.body;
     const normalizedEmail = email.toLowerCase();
+
+    if (!isInstitutionalEmail(normalizedEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: `Please use an institutional email address (${(process.env.INSTITUTION_EMAIL_DOMAINS || '.edu,.ac.in,.edu.in').split(',').join(', ')})`
+      });
+    }
 
     const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
-      return res.status(400).json({ message: 'User already exists with this email' });
+      return res.status(400).json({ success: false, message: 'User already exists with this email' });
     }
+
+    const tempPassword = generateOTP() + generateOTP();
 
     const user = await User.create({
       name,
       email: normalizedEmail,
-      password,
+      password: tempPassword,
       role,
       phone,
       department,
-      isActive: true
+      isActive: true,
+      emailVerified: true
     });
 
+    await sendPasswordEmail(user, tempPassword);
+
     res.status(201).json({
-      message: 'User account created successfully',
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        phone: user.phone,
-        department: user.department
+      success: true,
+      message: 'Invite sent successfully',
+      data: {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          phone: user.phone,
+          department: user.department
+        }
       }
     });
   } catch (error) {
     console.error('Admin invite error:', error);
-    res.status(500).json({ message: 'Server error while creating user account' });
+    res.status(500).json({ success: false, message: 'Server error while creating user account' });
   }
 });
 

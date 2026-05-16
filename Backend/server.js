@@ -139,7 +139,7 @@ app.use('/api/contributions', require('./routes/contributions'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/users', require('./routes/users'));
 app.use('/api/upload', require('./routes/upload'));
-app.use('/api/notification-scheduler', require('./routes/notifications'));
+app.use('/api/scheduler', require('./routes/notifications-scheduler'));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -150,12 +150,13 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.use('/api/notifications', require('./routes/notifications-api'));
+app.use('/api/notifications-api', require('./routes/notifications-api'));
 app.use('/api/certificates', require('./routes/certificates'));
 app.use('/api/ai-assistant', require('./routes/aiAssistant'));
 app.use('/api/stats', require('./routes/stats'));
 app.use('/api/problems', require('./routes/problemRoutes'));
 app.use('/api/period-config', require('./routes/periodConfig'));
+app.use('/api/academic-year-config', require('./routes/academicYearConfig'));
 app.use('/api/od-list', require('./routes/odList'));
 
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/nss-portal', {

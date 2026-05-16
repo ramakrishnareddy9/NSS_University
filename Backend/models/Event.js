@@ -44,6 +44,10 @@ const eventSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
+  academicYear: {
+    type: String,
+    trim: true
+  },
   status: {
     type: String,
     enum: ['draft', 'published', 'ongoing', 'completed', 'cancelled'],
@@ -101,6 +105,7 @@ const eventSchema = new mongoose.Schema({
 
 eventSchema.index({ status: 1, startDate: 1 });
 eventSchema.index({ startDate: 1, endDate: 1 });
+eventSchema.index({ academicYear: 1, startDate: 1 });
 
 module.exports = mongoose.model('Event', eventSchema);
 

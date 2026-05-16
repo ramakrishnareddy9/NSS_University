@@ -63,7 +63,6 @@ const ContributionForm = ({ participation, onClose, onSuccess }) => {
       await api.post('/contributions', {
         participationId: participation._id,
         report: data.report,
-        volunteerHours: parseFloat(data.volunteerHours),
         evidence: evidence
       });
       toast.success('Contribution submitted successfully');
@@ -126,21 +125,11 @@ const ContributionForm = ({ participation, onClose, onSuccess }) => {
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Volunteer Hours *
+              Volunteer Hours
             </label>
-            <input
-              {...register('volunteerHours', { 
-                required: 'Volunteer hours are required',
-                min: { value: 0.5, message: 'Must be at least 0.5 hours' },
-                max: { value: 24, message: 'Cannot exceed 24 hours per day' }
-              })}
-              type="number"
-              step="0.5"
-              min="0.5"
-              max="24"
-              className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-primary-500 focus:border-primary-500"
-            />
-            {errors.volunteerHours && <p className="text-red-500 text-xs mt-1">{errors.volunteerHours.message}</p>}
+            <div className="block w-full px-3 py-2 border border-gray-200 rounded-md bg-gray-50 text-sm text-gray-600">
+              Set automatically from the attendance record and event schedule.
+            </div>
           </div>
 
           <div>

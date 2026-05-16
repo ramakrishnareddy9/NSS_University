@@ -7,7 +7,7 @@ import anime from 'animejs/lib/anime.es.js';
 const Register = () => {
   const { register: registerUser } = useAuth();
   const navigate = useNavigate();
-  const { register, handleSubmit, watch, formState: { errors } } = useForm();
+  const { register, handleSubmit, formState: { errors } } = useForm();
   const formRef = useRef(null);
   const logoRef = useRef(null);
 
@@ -32,17 +32,11 @@ const Register = () => {
     });
   }, []);
 
-  const role = watch('role');
-
   const onSubmit = async (data) => {
-    const result = await registerUser(data);
+    const result = await registerUser({ ...data, role: 'student' });
     if (result.success) {
-      // Wait a bit for user to be set in context
-      setTimeout(() => {
-        const user = JSON.parse(localStorage.getItem('user') || '{}');
-        const userRole = user.role || data.role || 'student';
-        navigate(`/${userRole}/dashboard`);
-      }, 100);
+      localStorage.setItem('pendingVerificationEmail', data.email.toLowerCase());
+      navigate('/verify-email', { state: { email: data.email.toLowerCase() } });
     }
   };
 
@@ -79,7 +73,7 @@ const Register = () => {
             Join the NSS Community
           </p>
           <p className="mt-1.5 sm:mt-2 text-center text-xs sm:text-sm text-gray-600 dark:text-gray-300">
-            Already have an account?{' '}
+            Use your institutional email address. Already have an account?{' '}
             <Link to="/login" className="font-semibold text-green-600 hover:text-blue-600 underline-offset-4 hover:underline transition-all duration-300">
               Sign in here
             </Link>
@@ -127,72 +121,55 @@ const Register = () => {
             </div>
 
             <div>
-              <label htmlFor="role" className="block text-sm font-medium text-gray-700 dark:text-gray-200">
-                Role
+              <label htmlFor="studentId" className="block text-sm font-medium text-gray-700 dark:text-gray-200">
+                Student ID
               </label>
-              <select
-                {...register('role', { required: 'Role is required' })}
-                className="mt-1 block w-full px-3 py-2.5 sm:px-4 sm:py-3 border-2 border-white/50 bg-white text-sm sm:text-base rounded-lg sm:rounded-xl shadow-sm focus:outline-none focus:ring-2 sm:focus:ring-4 focus:ring-green-400/30 focus:border-green-400 hover:border-white/70 transition-all duration-300"
-              >
-                <option value="">Select role</option>
-                <option value="student">Student</option>
-                <option value="faculty">Faculty</option>
-                <option value="admin">Admin</option>
-              </select>
-              {errors.role && <p className="text-red-500 text-xs mt-1">{errors.role.message}</p>}
+              <input
+                {...register('studentId', { required: 'Student ID is required' })}
+                type="text"
+                placeholder="Enter your student ID"
+                className="mt-1 appearance-none relative block w-full px-3 py-2.5 sm:px-4 sm:py-3 border-2 border-white/50 bg-white placeholder-gray-400 text-sm sm:text-base text-gray-900 rounded-lg sm:rounded-xl focus:outline-none focus:ring-2 sm:focus:ring-4 focus:ring-green-400/30 focus:border-green-400 hover:border-white/70 transition-all duration-300 shadow-sm"
+              />
+              {errors.studentId && <p className="text-red-500 text-xs mt-1">{errors.studentId.message}</p>}
             </div>
 
-            {role === 'student' && (
-              <>
-                <div>
-                  <label htmlFor="studentId" className="block text-sm font-medium text-gray-700">
-                    Student ID
-                  </label>
-                  <input
-                    {...register('studentId', { required: 'Student ID is required' })}
-                    type="text"
-                    className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-primary-500 focus:border-primary-500 sm:text-sm"
-                  />
-                  {errors.studentId && <p className="text-red-500 text-xs mt-1">{errors.studentId.message}</p>}
-                </div>
-
-                <div>
-                  <label htmlFor="department" className="block text-sm font-medium text-gray-700">
-                    Department
-                  </label>
-                  <input
-                    {...register('department')}
-                    type="text"
-                    className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-primary-500 focus:border-primary-500 sm:text-sm"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="year" className="block text-sm font-medium text-gray-700">
-                    Year
-                  </label>
-                  <select
-                    {...register('year')}
-                    className="mt-1 block w-full px-3 py-2 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-primary-500 focus:border-primary-500 sm:text-sm"
-                  >
-                    <option value="1st">1st Year</option>
-                    <option value="2nd">2nd Year</option>
-                    <option value="3rd">3rd Year</option>
-                    <option value="4th">4th Year</option>
-                    <option value="PG">PG</option>
-                  </select>
-                </div>
-              </>
-            )}
+            <div>
+              <label htmlFor="department" className="block text-sm font-medium text-gray-700 dark:text-gray-200">
+                Department
+              </label>
+              <input
+                {...register('department')}
+                type="text"
+                placeholder="Enter your department"
+                className="mt-1 appearance-none relative block w-full px-3 py-2.5 sm:px-4 sm:py-3 border-2 border-white/50 bg-white placeholder-gray-400 text-sm sm:text-base text-gray-900 rounded-lg sm:rounded-xl focus:outline-none focus:ring-2 sm:focus:ring-4 focus:ring-green-400/30 focus:border-green-400 hover:border-white/70 transition-all duration-300 shadow-sm"
+              />
+            </div>
 
             <div>
-              <label htmlFor="phone" className="block text-sm font-medium text-gray-700">
+              <label htmlFor="year" className="block text-sm font-medium text-gray-700 dark:text-gray-200">
+                Year
+              </label>
+              <select
+                {...register('year')}
+                className="mt-1 block w-full px-3 py-2.5 sm:px-4 sm:py-3 border-2 border-white/50 bg-white text-sm sm:text-base rounded-lg sm:rounded-xl shadow-sm focus:outline-none focus:ring-2 sm:focus:ring-4 focus:ring-green-400/30 focus:border-green-400 hover:border-white/70 transition-all duration-300"
+              >
+                <option value="1st">1st Year</option>
+                <option value="2nd">2nd Year</option>
+                <option value="3rd">3rd Year</option>
+                <option value="4th">4th Year</option>
+                <option value="PG">PG</option>
+              </select>
+            </div>
+
+            <div>
+              <label htmlFor="phone" className="block text-sm font-medium text-gray-700 dark:text-gray-200">
                 Phone (Optional)
               </label>
               <input
                 {...register('phone')}
                 type="tel"
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-primary-500 focus:border-primary-500 sm:text-sm"
+                placeholder="Enter your phone number"
+                className="mt-1 appearance-none relative block w-full px-3 py-2.5 sm:px-4 sm:py-3 border-2 border-white/50 bg-white placeholder-gray-400 text-sm sm:text-base text-gray-900 rounded-lg sm:rounded-xl focus:outline-none focus:ring-2 sm:focus:ring-4 focus:ring-green-400/30 focus:border-green-400 hover:border-white/70 transition-all duration-300 shadow-sm"
               />
             </div>
           </div>
@@ -211,6 +188,11 @@ const Register = () => {
             </button>
           </div>
         </form>
+        <div className="mt-4 p-3 bg-green-50/80 dark:bg-green-900/30 rounded-lg border border-green-200 dark:border-green-700">
+          <p className="text-xs text-green-700 dark:text-green-300 text-center">
+            Registration now requires an institutional email address and OTP verification before you can sign in.
+          </p>
+        </div>
       </div>
     </div>
   );

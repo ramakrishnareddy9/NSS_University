@@ -100,7 +100,7 @@ router.post('/send-reminder', [auth, authorize('admin', 'faculty')], async (req,
   }
 });
 
-// @route   DELETE /api/notifications-api/clear
+// @route   DELETE /api/scheduler/clear
 // @desc    Clear all notifications for current user
 // @access  Private
 router.delete('/clear', auth, async (req, res) => {

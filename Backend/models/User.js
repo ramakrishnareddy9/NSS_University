@@ -94,6 +94,10 @@ const userSchema = new mongoose.Schema({
   isActive: {
     type: Boolean,
     default: true
+  },
+  emailVerified: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true

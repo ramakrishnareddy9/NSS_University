@@ -4,8 +4,10 @@ const { body, validationResult } = require('express-validator');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const PasswordResetOTP = require('../models/PasswordResetOTP');
+const EmailVerificationOTP = require('../models/EmailVerificationOTP');
 const { auth } = require('../middleware/auth');
-const { sendPasswordResetOTP, generateOTP } = require('../utils/notifications');
+const { sendPasswordResetOTP, sendEmail, generateOTP } = require('../utils/notifications');
+const { isInstitutionalEmail } = require('../utils/emailPolicy');
 
 const router = express.Router();
 const jwtSecret = process.env.JWT_SECRET;
@@ -33,18 +35,26 @@ router.post('/register', [
     }
 
     const { name, email, password, role, studentId, phone, department, year, academicYear, batch } = req.body;
+    const normalizedEmail = email.toLowerCase();
+
+    if (!isInstitutionalEmail(normalizedEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: `Please use an institutional email address (${(process.env.INSTITUTION_EMAIL_DOMAINS || '.edu,.ac.in,.edu.in').split(',').join(', ')})`
+      });
+    }
 
     // Check if user already exists
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
-      return res.status(400).json({ message: 'User already exists with this email' });
+      return res.status(400).json({ success: false, message: 'User already exists with this email' });
     }
 
     // Check if studentId already exists (for students)
     if (role === 'student' && studentId) {
       const existingStudent = await User.findOne({ studentId });
       if (existingStudent) {
-        return res.status(400).json({ message: 'Student ID already exists' });
+        return res.status(400).json({ success: false, message: 'Student ID already exists' });
       }
     }
 
@@ -65,7 +75,7 @@ router.post('/register', [
     // Create user
     const user = new User({
       name,
-      email,
+      email: normalizedEmail,
       password,
       role,
       studentId: role === 'student' ? studentId : undefined,
@@ -73,26 +83,116 @@ router.post('/register', [
       department,
       year: role === 'student' ? year : undefined,
       academicYear: role === 'student' ? resolvedAcademicYear : undefined,
-      batch: role === 'student' ? resolvedBatch : undefined
+      batch: role === 'student' ? resolvedBatch : undefined,
+      isActive: false,
+      emailVerified: false
     });
 
     await user.save();
 
-    const token = generateToken(user._id);
+    const otp = generateOTP();
+    await EmailVerificationOTP.deleteMany({ email: normalizedEmail });
+    await EmailVerificationOTP.create({
+      email: normalizedEmail,
+      otp: await bcrypt.hash(otp, 10),
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+    });
+
+    const verificationEmailResult = await sendEmail(
+      normalizedEmail,
+      'Verify your NSS Portal email address',
+      `Your verification code is ${otp}`,
+      `<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #2563eb;">Verify your email</h2>
+        <p>Use this verification code to activate your NSS Portal account:</p>
+        <div style="font-size: 28px; font-weight: bold; letter-spacing: 4px; margin: 20px 0;">${otp}</div>
+        <p>This code expires in 15 minutes.</p>
+      </div>`
+    );
+
+    if (!verificationEmailResult.success) {
+      return res.status(500).json({
+        success: false,
+        message: 'Account created, but verification email could not be sent. Please try again later.'
+      });
+    }
 
     res.status(201).json({
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
+      success: true,
+      message: 'Registration successful. Please verify your email with the OTP sent to your inbox.',
+      data: {
         email: user.email,
-        role: user.role,
-        studentId: user.studentId
+        requiresVerification: true
       }
     });
   } catch (error) {
     console.error('Registration error:', error);
-    res.status(500).json({ message: 'Server error during registration' });
+    res.status(500).json({ success: false, message: 'Server error during registration' });
+  }
+});
+
+// @route   POST /api/auth/verify-email
+// @desc    Verify signup email OTP and activate account
+// @access  Public
+router.post('/verify-email', [
+  body('email').isEmail().withMessage('Please provide a valid email'),
+  body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    const { email, otp } = req.body;
+    const normalizedEmail = email.toLowerCase();
+
+    const otpRecord = await EmailVerificationOTP.findOne({
+      email: normalizedEmail,
+      isUsed: false,
+      expiresAt: { $gt: new Date() }
+    }).select('+otp');
+
+    if (!otpRecord) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
+    }
+
+    const isOtpValid = await bcrypt.compare(otp, otpRecord.otp);
+    if (!isOtpValid) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    user.emailVerified = true;
+    user.isActive = true;
+    await user.save();
+
+    otpRecord.isUsed = true;
+    await otpRecord.save();
+
+    const token = generateToken(user._id);
+
+    res.json({
+      success: true,
+      message: 'Email verified successfully',
+      data: {
+        token,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          studentId: user.studentId
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Verify email error:', error);
+    res.status(500).json({ success: false, message: 'Server error during email verification' });
   }
 });
 
@@ -114,36 +214,43 @@ router.post('/login', [
     // Find user
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
+    if (user.emailVerified === false) {
+      return res.status(401).json({ success: false, message: 'Email not verified' });
     }
 
     // Check password
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
     // Check if user is active
     if (!user.isActive) {
-      return res.status(401).json({ message: 'Account is deactivated' });
+      return res.status(401).json({ success: false, message: 'Account is deactivated' });
     }
 
     const token = generateToken(user._id);
 
     res.json({
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        studentId: user.studentId,
-        totalVolunteerHours: user.totalVolunteerHours
+      success: true,
+      data: {
+        token,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          studentId: user.studentId,
+          totalVolunteerHours: user.totalVolunteerHours
+        }
       }
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ message: 'Server error during login' });
+    res.status(500).json({ success: false, message: 'Server error during login' });
   }
 });
 
@@ -156,7 +263,7 @@ router.post('/forgot-password', [
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+      return res.status(400).json({ success: false, errors: errors.array() });
     }
 
     const { email } = req.body;
@@ -164,12 +271,12 @@ router.post('/forgot-password', [
     // Find user by email
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(404).json({ message: 'No account found with this email address' });
+      return res.status(404).json({ success: false, message: 'No account found with this email address' });
     }
 
     // Check if user is active
     if (!user.isActive) {
-      return res.status(401).json({ message: 'Account is deactivated' });
+      return res.status(401).json({ success: false, message: 'Account is deactivated' });
     }
 
     console.log(`🔑 Password reset request for user: ${user.name} (${user.email})`);
@@ -195,7 +302,7 @@ router.post('/forgot-password', [
       res.json({ 
         success: true, 
         message: 'OTP has been sent to your email address',
-        email: email // Return email for verification step
+        data: { email } // Return email for verification step
       });
     } else {
       console.error('Failed to send OTP email:', emailResult.error);
@@ -227,7 +334,7 @@ router.post('/verify-otp', [
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+      return res.status(400).json({ success: false, errors: errors.array() });
     }
 
     const { email, otp, newPassword } = req.body;
@@ -240,18 +347,18 @@ router.post('/verify-otp', [
     }).select('+otp');
 
     if (!otpRecord) {
-      return res.status(400).json({ message: 'Invalid or expired OTP' });
+      return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
     }
 
     const isOtpValid = await bcrypt.compare(otp, otpRecord.otp);
     if (!isOtpValid) {
-      return res.status(400).json({ message: 'Invalid or expired OTP' });
+      return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
     }
 
     // Find user
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+      return res.status(404).json({ success: false, message: 'User not found' });
     }
 
     // Update password
@@ -270,7 +377,7 @@ router.post('/verify-otp', [
     });
   } catch (error) {
     console.error('Verify OTP error:', error);
-    res.status(500).json({ message: 'Server error during password reset' });
+    res.status(500).json({ success: false, message: 'Server error during password reset' });
   }
 });
 
@@ -281,10 +388,10 @@ router.get('/me', auth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select('-password');
     console.log(`👤 User ${user.name} - Total Volunteer Hours: ${user.totalVolunteerHours || 0}`);
-    res.json(user);
+    res.json({ success: true, data: user });
   } catch (error) {
     console.error('Get user error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 

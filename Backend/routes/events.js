@@ -9,6 +9,7 @@ const validateObjectId = require('../middleware/validateObjectId');
 const { sendNewEventNotification } = require('../utils/notifications');
 const escapeRegex = require('../utils/escapeRegex');
 const { getPagination, buildPagedResponse } = require('../utils/pagination');
+const { resolveAcademicYearContext } = require('../utils/academicYear');
 
 const router = express.Router();
 const allowedStudentStatuses = ['published', 'ongoing', 'completed'];
@@ -83,7 +84,7 @@ async function notifyStudentsAboutEvent(event, req) {
 // @access  Private (authenticated)
 router.get('/', auth, async (req, res) => {
   try {
-    const { status, eventType, search } = req.query;
+    const { status, eventType, search, academicYear } = req.query;
     const query = {};
 
     if (req.user.role === 'student') {
@@ -96,6 +97,10 @@ router.get('/', auth, async (req, res) => {
 
     if (eventType) {
       query.eventType = eventType;
+    }
+
+    if (academicYear) {
+      query.academicYear = academicYear;
     }
 
     if (search) {
@@ -207,7 +212,12 @@ router.post('/', [
       return res.status(400).json({ message: 'registrationDeadline must be before startDate' });
     }
 
-    const event = new Event({ ...req.body, organizer: req.user.id });
+    const academicYearContext = await resolveAcademicYearContext(undefined, start);
+    const event = new Event({
+      ...req.body,
+      academicYear: academicYearContext.label,
+      organizer: req.user.id
+    });
     await event.save();
     await event.populate('organizer', 'name email');
 
@@ -264,6 +274,12 @@ router.put('/:id', [auth, authorize('admin', 'faculty'), validateObjectId('id')]
     }
 
     Object.assign(event, req.body);
+
+    if (event.startDate) {
+      const academicYearContext = await resolveAcademicYearContext(undefined, event.startDate);
+      event.academicYear = academicYearContext.label;
+    }
+
     await event.save();
     await event.populate('organizer', 'name email');
     res.json(event);

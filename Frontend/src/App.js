@@ -12,6 +12,7 @@ import OpeningAnimation from './components/OpeningAnimation';
 import Landing from './pages/Landing';
 import Login from './pages/Auth/Login';
 import Register from './pages/Auth/Register';
+import VerifyEmail from './pages/Auth/VerifyEmail';
 import ForgotPassword from './pages/Auth/ForgotPassword';
 import AdminDashboard from './pages/Admin/Dashboard';
 import AdminEvents from './pages/Admin/Events';
@@ -27,6 +28,8 @@ import MyReports from './pages/Student/MyReports';
 import ReportProblem from './pages/Student/ReportProblem';
 import MyProblemReports from './pages/Student/MyProblemReports';
 import ProblemDashboard from './pages/Admin/ProblemDashboard';
+import InviteUser from './pages/Admin/InviteUser';
+import AcademicYearConfig from './pages/Admin/AcademicYearConfig';
 import PeriodConfig from './pages/Admin/PeriodConfig';
 import Leaderboard from './pages/Leaderboard';
 import FacultyDashboard from './pages/Faculty/Dashboard';
@@ -34,7 +37,7 @@ import theme from './theme';
 
 function AppContent() {
   const location = useLocation();
-  const noNavbarRoutes = ['/', '/login', '/register', '/forgot-password'];
+  const noNavbarRoutes = ['/', '/login', '/register', '/verify-email', '/forgot-password'];
   const shouldHideNavbar = noNavbarRoutes.includes(location.pathname);
   const [showAnimation, setShowAnimation] = useState(false);
 
@@ -62,6 +65,7 @@ function AppContent() {
         <Route path="/" element={<Landing />} />
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
+        <Route path="/verify-email" element={<VerifyEmail />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
             
             {/* Admin Routes */}
@@ -126,6 +130,22 @@ function AppContent() {
               element={
                 <PrivateRoute roles={['admin']}>
                   <PeriodConfig />
+                </PrivateRoute>
+              }
+            />
+            <Route
+              path="/admin/academic-year-config"
+              element={
+                <PrivateRoute roles={['admin']}>
+                  <AcademicYearConfig />
+                </PrivateRoute>
+              }
+            />
+            <Route
+              path="/admin/invite"
+              element={
+                <PrivateRoute roles={['admin']}>
+                  <InviteUser />
                 </PrivateRoute>
               }
             />

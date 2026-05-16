@@ -187,6 +187,18 @@ const AdminDashboard = () => {
             >
               Generate Reports
             </a>
+            <a
+              href="/admin/invite"
+              className="block w-full text-left px-4 py-2 bg-primary-50 hover:bg-primary-100 rounded-md text-primary-700 font-medium"
+            >
+              Invite Faculty or Admin
+            </a>
+            <a
+              href="/admin/academic-year-config"
+              className="block w-full text-left px-4 py-2 bg-primary-50 hover:bg-primary-100 rounded-md text-primary-700 font-medium"
+            >
+              Manage Academic Years
+            </a>
           </div>
         </div>
       </div>

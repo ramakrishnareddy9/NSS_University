@@ -52,6 +52,9 @@ const Login = () => {
           const role = user.role || 'student';
           navigate(`/${role}/dashboard`);
         }, 100);
+      } else if (result.error && result.error.toLowerCase().includes('email not verified')) {
+        localStorage.setItem('pendingVerificationEmail', data.email.toLowerCase());
+        navigate('/verify-email', { state: { email: data.email.toLowerCase() } });
       }
     } finally {
       isSubmittingRef.current = false;
