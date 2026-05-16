@@ -10,6 +10,7 @@ const Contribution = require('../models/Contribution');
 const User = require('../models/User');
 const Report = require('../models/Report');
 const { auth, authorize } = require('../middleware/auth');
+const validateObjectId = require('../middleware/validateObjectId');
 const { analyzeStudentReport, generateConsolidatedReport, generateEventSummary } = require('../services/geminiService');
 
 function addWrappedText(doc, text, startY, options = {}) {
@@ -54,7 +55,7 @@ const router = express.Router();
 // @route   GET /api/reports/event/:id
 // @desc    Generate event report PDF
 // @access  Private (Admin/Faculty)
-router.get('/event/:id', [auth, authorize('admin', 'faculty')], async (req, res) => {
+router.get('/event/:id', [auth, authorize('admin', 'faculty'), validateObjectId('id')], async (req, res) => {
   try {
     const event = await Event.findById(req.params.id)
       .populate('organizer', 'name email')
@@ -149,7 +150,7 @@ router.get('/event/:id', [auth, authorize('admin', 'faculty')], async (req, res)
 // @route   GET /api/reports/certificate/:participationId
 // @desc    Generate participation certificate PDF
 // @access  Private
-router.get('/certificate/:participationId', auth, async (req, res) => {
+router.get('/certificate/:participationId', auth, validateObjectId('participationId'), async (req, res) => {
   try {
     const participation = await Participation.findById(req.params.participationId)
       .populate('student', 'name email studentId')
@@ -238,25 +239,74 @@ router.get('/certificate/:participationId', auth, async (req, res) => {
 // @access  Private (Admin only)
 router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
   try {
-    const { year } = req.query;
-    const currentYear = year || new Date().getFullYear();
+    const { year, academicYear, startMonth, endMonth } = req.query;
 
-    const startDate = new Date(`${currentYear}-01-01`);
-    const endDate = new Date(`${currentYear}-12-31`);
+    const buildAcademicRange = (academicYearValue) => {
+      const match = /^\s*(\d{4})-(\d{2})\s*$/.exec(String(academicYearValue || ''));
+      if (!match) {
+        return null;
+      }
+
+      const startYear = parseInt(match[1], 10);
+      const endYear = startYear + 1;
+      const expectedEndSuffix = String(endYear).slice(-2);
+
+      if (match[2] !== expectedEndSuffix) {
+        return null;
+      }
+
+      const rangeStart = new Date(startYear, 5, 1, 0, 0, 0, 0); // June 1
+      const rangeEnd = new Date(endYear, 4, 31, 23, 59, 59, 999); // May 31
+      return { rangeStart, rangeEnd, label: academicYearValue };
+    };
+
+    const buildMonthRange = (yearValue, startMonthValue, endMonthValue) => {
+      const reportYear = parseInt(yearValue, 10);
+      const start = parseInt(startMonthValue, 10);
+      const end = parseInt(endMonthValue, 10);
+
+      if (!Number.isFinite(reportYear) || !Number.isFinite(start) || !Number.isFinite(end)) {
+        return null;
+      }
+
+      if (start < 1 || start > 12 || end < 1 || end > 12) {
+        return null;
+      }
+
+      const rangeStart = new Date(reportYear, start - 1, 1, 0, 0, 0, 0);
+      const rangeEnd = new Date(reportYear, end, 0, 23, 59, 59, 999);
+      if (rangeEnd < rangeStart) {
+        return null;
+      }
+
+      return { rangeStart, rangeEnd, label: `${reportYear}-${String(start).padStart(2, '0')}-${String(end).padStart(2, '0')}` };
+    };
+
+    const academicRange = academicYear ? buildAcademicRange(academicYear) : null;
+    const monthRange = !academicRange && startMonth && endMonth ? buildMonthRange(year || new Date().getFullYear(), startMonth, endMonth) : null;
+    const fallbackYear = year || new Date().getFullYear();
+    const defaultRange = {
+      rangeStart: new Date(`${fallbackYear}-01-01T00:00:00.000Z`),
+      rangeEnd: new Date(`${fallbackYear}-12-31T23:59:59.999Z`),
+      label: String(fallbackYear)
+    };
+
+    const selectedRange = academicRange || monthRange || defaultRange;
+    const { rangeStart, rangeEnd, label } = selectedRange;
 
     // Get all events for the year
     const events = await Event.find({
-      startDate: { $gte: startDate, $lte: endDate }
+      startDate: { $gte: rangeStart, $lte: rangeEnd }
     });
 
     // Get all participations
     const participations = await Participation.find({
-      createdAt: { $gte: startDate, $lte: endDate }
+      createdAt: { $gte: rangeStart, $lte: rangeEnd }
     }).populate('student', 'name email studentId department year');
 
     // Get all contributions
     const contributions = await Contribution.find({
-      submittedAt: { $gte: startDate, $lte: endDate }
+      submittedAt: { $gte: rangeStart, $lte: rangeEnd }
     }).populate('student', 'name email studentId');
 
     // Get all students with their total hours
@@ -275,7 +325,7 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
       // Summary Sheet
       const validParticipations = participations.filter(p => p.student);
       const summaryData = [
-        ['NSS Annual Summary', currentYear],
+        ['NSS Annual Summary', label],
         [],
         ['Total Events', events.length],
         ['Total Registrations', participations.length],
@@ -333,7 +383,7 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
       const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
 
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', `attachment; filename="nss-annual-summary-${currentYear}.xlsx"`);
+      res.setHeader('Content-Disposition', `attachment; filename="nss-annual-summary-${label}.xlsx"`);
       res.send(excelBuffer);
     } else {
       // Generate PDF
@@ -341,7 +391,7 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
       let yPos = 20;
 
       doc.setFontSize(20);
-      doc.text(`NSS Annual Summary ${currentYear}`, 105, yPos, { align: 'center' });
+      doc.text(`NSS Annual Summary ${label}`, 105, yPos, { align: 'center' });
       yPos += 20;
 
       doc.setFontSize(14);
@@ -402,7 +452,7 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
       const pdfBuffer = Buffer.from(doc.output('arraybuffer'));
 
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="nss-annual-summary-${currentYear}.pdf"`);
+      res.setHeader('Content-Disposition', `attachment; filename="nss-annual-summary-${label}.pdf"`);
       res.send(pdfBuffer);
     }
   } catch (error) {

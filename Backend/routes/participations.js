@@ -1,10 +1,15 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Participation = require('../models/Participation');
 const Event = require('../models/Event');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
 const { auth, authorize } = require('../middleware/auth');
+const validateObjectId = require('../middleware/validateObjectId');
+const appConfig = require('../config/appConfig');
+const AuditLog = require('../models/AuditLog');
 const { sendRegistrationConfirmation, sendApprovalNotification } = require('../utils/notifications');
+const { getPagination, buildPagedResponse } = require('../utils/pagination');
 
 const router = express.Router();
 
@@ -29,13 +34,18 @@ router.get('/', auth, async (req, res) => {
       query.status = req.query.status;
     }
 
+    const { page, limit, skip } = getPagination(req);
+    const total = await Participation.countDocuments(query);
+
     const participations = await Participation.find(query)
       .populate('student', 'name email studentId department year')
       .populate('event', 'title eventType startDate endDate location')
       .populate('approvedBy', 'name email')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
 
-    res.json(participations);
+    res.json(buildPagedResponse(participations, total, page, limit));
   } catch (error) {
     console.error('Get participations error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -53,50 +63,74 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
       return res.status(400).json({ message: 'Event ID is required' });
     }
 
-    const event = await Event.findById(eventId);
-    if (!event) {
-      return res.status(404).json({ message: 'Event not found' });
+    const session = await mongoose.startSession();
+    let participation;
+
+    try {
+      await session.withTransaction(async () => {
+        const event = await Event.findById(eventId).session(session);
+        if (!event) {
+          const error = new Error('Event not found');
+          error.statusCode = 404;
+          throw error;
+        }
+
+        // Check if event is published
+        if (event.status !== 'published' && event.status !== 'ongoing') {
+          const error = new Error('Event is not available for registration');
+          error.statusCode = 400;
+          throw error;
+        }
+
+        // Check registration deadline
+        if (new Date() > new Date(event.registrationDeadline)) {
+          const error = new Error('Registration deadline has passed');
+          error.statusCode = 400;
+          throw error;
+        }
+
+        // Check max participants
+        if (event.maxParticipants && event.currentParticipants >= event.maxParticipants) {
+          const error = new Error('Event is full');
+          error.statusCode = 400;
+          throw error;
+        }
+
+        // Check if already registered
+        const existingParticipation = await Participation.findOne({
+          student: req.user.id,
+          event: eventId
+        }).session(session);
+
+        if (existingParticipation) {
+          const error = new Error('Already registered for this event');
+          error.statusCode = 400;
+          throw error;
+        }
+
+        // Create participation
+        participation = new Participation({
+          student: req.user.id,
+          event: eventId,
+          status: 'pending'
+        });
+
+        await participation.save({ session });
+
+        // Atomically update event: increment participant count and add participation reference
+        await Event.findByIdAndUpdate(eventId, {
+          $inc: { currentParticipants: 1 },
+          $push: { participations: participation._id }
+        }, { session });
+      });
+    } catch (txnError) {
+      if (txnError.statusCode) {
+        return res.status(txnError.statusCode).json({ message: txnError.message });
+      }
+      throw txnError;
+    } finally {
+      session.endSession();
     }
-
-    // Check if event is published
-    if (event.status !== 'published' && event.status !== 'ongoing') {
-      return res.status(400).json({ message: 'Event is not available for registration' });
-    }
-
-    // Check registration deadline
-    if (new Date() > new Date(event.registrationDeadline)) {
-      return res.status(400).json({ message: 'Registration deadline has passed' });
-    }
-
-    // Check max participants
-    if (event.maxParticipants && event.currentParticipants >= event.maxParticipants) {
-      return res.status(400).json({ message: 'Event is full' });
-    }
-
-    // Check if already registered
-    const existingParticipation = await Participation.findOne({
-      student: req.user.id,
-      event: eventId
-    });
-
-    if (existingParticipation) {
-      return res.status(400).json({ message: 'Already registered for this event' });
-    }
-
-    // Create participation
-    const participation = new Participation({
-      student: req.user.id,
-      event: eventId,
-      status: 'pending'
-    });
-
-    await participation.save();
-
-    // Atomically update event: increment participant count and add participation reference
-    await Event.findByIdAndUpdate(eventId, {
-      $inc: { currentParticipants: 1 },
-      $push: { participations: participation._id }
-    }).catch(err => console.error('Failed to atomically update event on registration:', err));
 
     await participation.populate('student', 'name email studentId');
     await participation.populate('event', 'title eventType startDate endDate location');
@@ -143,7 +177,7 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
 // @route   PUT /api/participations/:id/approve
 // @desc    Approve participation request
 // @access  Private (Admin/Faculty only)
-router.put('/:id/approve', [auth, authorize('admin', 'faculty')], async (req, res) => {
+router.put('/:id/approve', [auth, authorize('admin', 'faculty'), validateObjectId('id')], async (req, res) => {
   try {
     const participation = await Participation.findById(req.params.id);
 
@@ -270,7 +304,7 @@ router.put('/:id/approve', [auth, authorize('admin', 'faculty')], async (req, re
 // @route   PUT /api/participations/:id/reject
 // @desc    Reject participation request
 // @access  Private (Admin/Faculty only)
-router.put('/:id/reject', [auth, authorize('admin', 'faculty')], async (req, res) => {
+router.put('/:id/reject', [auth, authorize('admin', 'faculty'), validateObjectId('id')], async (req, res) => {
   try {
     const participation = await Participation.findById(req.params.id);
 
@@ -282,20 +316,24 @@ router.put('/:id/reject', [auth, authorize('admin', 'faculty')], async (req, res
       return res.status(400).json({ message: 'Participation is not pending' });
     }
 
-    participation.status = 'rejected';
-    participation.rejectedAt = new Date();
-    participation.rejectedBy = req.user.id;
-
-    await participation.save();
-
-    // Atomically decrement participant count and remove participation reference from event
+    const session = await mongoose.startSession();
     try {
-      await Event.findByIdAndUpdate(participation.event, {
-        $inc: { currentParticipants: -1 },
-        $pull: { participations: participation._id }
+      await session.withTransaction(async () => {
+        const participationInTxn = await Participation.findById(participation._id).session(session);
+        participationInTxn.status = 'rejected';
+        participationInTxn.rejectedAt = new Date();
+        participationInTxn.rejectedBy = req.user.id;
+
+        await participationInTxn.save({ session });
+
+        // Atomically decrement participant count and remove participation reference from event
+        await Event.findByIdAndUpdate(participationInTxn.event, {
+          $inc: { currentParticipants: -1 },
+          $pull: { participations: participationInTxn._id }
+        }, { session });
       });
-    } catch (err) {
-      console.error('Failed to atomically update event on rejection:', err);
+    } finally {
+      session.endSession();
     }
 
     await participation.populate('student', 'name email studentId');
@@ -332,10 +370,10 @@ router.put('/:id/reject', [auth, authorize('admin', 'faculty')], async (req, res
 // @route   PUT /api/participations/:id/complete
 // @desc    Mark participation as completed (Admin/Faculty) — allows bypassing contribution requirement
 // @access  Private (Admin/Faculty only)
-router.put('/:id/complete', [auth, authorize('admin', 'faculty')], async (req, res) => {
+router.put('/:id/complete', [auth, authorize('admin', 'faculty'), validateObjectId('id')], async (req, res) => {
   try {
     const { volunteerHours } = req.body;
-    const participation = await Participation.findById(req.params.id)
+    let participation = await Participation.findById(req.params.id)
       .populate('student', 'totalVolunteerHours name email')
       .populate('event', 'startDate endDate title');
 
@@ -351,44 +389,63 @@ router.put('/:id/complete', [auth, authorize('admin', 'faculty')], async (req, r
       }
     }
 
-    // Set completed audit fields
-    participation.status = 'completed';
-    participation.completedAt = new Date();
-    participation.completedBy = req.user.id;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const participationInTxn = await Participation.findById(participation._id)
+          .populate('student', 'totalVolunteerHours name email')
+          .session(session);
 
-    // If admin provided volunteerHours, validate against event duration cap and update student's totals accordingly
-    if (typeof volunteerHours !== 'undefined') {
-      const newHours = Number(volunteerHours) || 0;
-      const oldHours = participation.volunteerHours || 0;
+        // Set completed audit fields
+        participationInTxn.status = 'completed';
+        participationInTxn.completedAt = new Date();
+        participationInTxn.completedBy = req.user.id;
 
-      // Determine maximum allowed hours: event duration in hours + 2 hour buffer
-      let maxAllowed = 24; // sensible default cap
-      if (participation.event && participation.event.startDate && participation.event.endDate) {
-        const durationInMs = new Date(participation.event.endDate) - new Date(participation.event.startDate);
-        const durationHours = Math.max(0, Math.round(durationInMs / (1000 * 60 * 60)));
-        maxAllowed = Math.max(1, durationHours + 2);
-      }
+        // If admin provided volunteerHours, validate against event duration cap and update student's totals accordingly
+        if (typeof volunteerHours !== 'undefined') {
+          const newHours = Number(volunteerHours) || 0;
+          const oldHours = participationInTxn.volunteerHours || 0;
 
-      if (newHours < 0 || newHours > maxAllowed) {
-        return res.status(400).json({ message: `volunteerHours must be between 0 and ${maxAllowed}` });
-      }
+          // Determine maximum allowed hours: event duration in hours + 2 hour buffer
+          let maxAllowed = 24; // sensible default cap
+          if (participationInTxn.event && participationInTxn.event.startDate && participationInTxn.event.endDate) {
+            const durationInMs = new Date(participationInTxn.event.endDate) - new Date(participationInTxn.event.startDate);
+            const durationHours = Math.max(0, Math.round(durationInMs / (1000 * 60 * 60)));
+            maxAllowed = Math.max(1, durationHours + 2);
+          }
 
-      const delta = newHours - oldHours;
-      participation.volunteerHours = newHours;
+          if (newHours < 0 || newHours > maxAllowed) {
+            const error = new Error(`volunteerHours must be between 0 and ${maxAllowed}`);
+            error.statusCode = 400;
+            throw error;
+          }
 
-      if (delta !== 0) {
-        const student = await User.findById(participation.student._id || participation.student);
-        if (student) {
-          student.totalVolunteerHours = Math.max(0, (student.totalVolunteerHours || 0) + delta);
-          await student.save();
+          const delta = newHours - oldHours;
+          participationInTxn.volunteerHours = newHours;
+
+          if (delta !== 0) {
+            const student = await User.findById(participationInTxn.student._id || participationInTxn.student).session(session);
+            if (student) {
+              student.totalVolunteerHours = Math.max(0, (student.totalVolunteerHours || 0) + delta);
+              await student.save({ session });
+            }
+          }
         }
+
+        await participationInTxn.save({ session });
+      });
+    } catch (txnError) {
+      if (txnError.statusCode) {
+        return res.status(txnError.statusCode).json({ message: txnError.message });
       }
+      throw txnError;
+    } finally {
+      session.endSession();
     }
 
-    await participation.save();
-
-    await participation.populate('student', 'name email studentId totalVolunteerHours');
-    await participation.populate('event', 'title eventType startDate endDate');
+    participation = await Participation.findById(participation._id)
+      .populate('student', 'name email studentId totalVolunteerHours')
+      .populate('event', 'title eventType startDate endDate');
 
     // Emit socket event
     try {
@@ -420,7 +477,7 @@ router.put('/:id/complete', [auth, authorize('admin', 'faculty')], async (req, r
 // @route   PUT /api/participations/:id/attendance
 // @desc    Mark attendance
 // @access  Private (Admin/Faculty only)
-router.put('/:id/attendance', [auth, authorize('admin', 'faculty')], async (req, res) => {
+router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObjectId('id')], async (req, res) => {
   try {
     const { attended, volunteerHours } = req.body;
     console.log('\n🎯 === ATTENDANCE MARKING REQUEST ===');
@@ -428,7 +485,7 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty')], async (req,
     console.log('Attended:', attended);
     console.log('Volunteer Hours (from request):', volunteerHours);
 
-    const participation = await Participation.findById(req.params.id)
+    let participation = await Participation.findById(req.params.id)
       .populate('event')
       .populate('student', 'name email totalVolunteerHours');
 
@@ -437,83 +494,160 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty')], async (req,
       return res.status(404).json({ message: 'Participation not found' });
     }
 
+    // Enforce attendance marking window: only allow within X days after event endDate
+    const graceDays = parseInt(appConfig.ATTENDANCE_MARKING_GRACE_DAYS, 10) || 7;
+    if (participation.event && participation.event.endDate) {
+      const endDate = new Date(participation.event.endDate);
+      const allowedUntil = new Date(endDate.getTime() + graceDays * 24 * 60 * 60 * 1000);
+      const now = new Date();
+      if (now > allowedUntil) {
+        // If admin wants to force, they must provide `{ force: true }` and be admin role
+        const force = req.body.force === true || req.body.force === 'true';
+        if (!(force && req.user.role === 'admin')) {
+          // Log the denied attempt
+          try {
+            await AuditLog.create({
+              action: 'attendance_mark_attempt_out_of_window',
+              actor: req.user._id,
+              targetModel: 'Participation',
+              targetId: participation._id,
+              details: {
+                eventId: participation.event._id,
+                eventEndDate: participation.event.endDate,
+                allowedUntil,
+                attemptedAt: new Date(),
+                attemptedAttendedValue: attended
+              }
+            });
+          } catch (logErr) {
+            console.error('Failed to write AuditLog for out-of-window attendance attempt:', logErr);
+          }
+
+          return res.status(400).json({ message: `Attendance marking window has expired (allowed within ${graceDays} days after event end). To force this action, resubmit with { force: true } as an Admin.` });
+        }
+      }
+    }
+
     console.log('Student:', participation.student.name);
     console.log('Current Student Hours:', participation.student.totalVolunteerHours);
     console.log('Event:', participation.event.title);
 
-    const wasAttended = participation.attendance;
-    participation.attendance = attended;
-    participation.attendanceDate = attended ? new Date() : null;
-    participation.status = attended ? 'attended' : participation.status;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const participationInTxn = await Participation.findById(participation._id)
+          .populate('student', 'name email totalVolunteerHours')
+          .populate('event')
+          .session(session);
 
-    // Calculate volunteer hours if marking as attended
-    if (attended && !wasAttended) {
-      console.log('\n📊 Calculating volunteer hours...');
-      // Use provided hours or calculate from event duration
-      let hours = typeof volunteerHours !== 'undefined' ? Number(volunteerHours) : undefined;
-      if (typeof hours === 'undefined' || Number.isNaN(hours)) {
-        if (participation.event) {
-          // Calculate hours from event start and end date (in hours)
-          const startDate = new Date(participation.event.startDate);
-          const endDate = new Date(participation.event.endDate);
-          const durationInMs = endDate - startDate;
-          hours = Math.max(1, Math.round(durationInMs / (1000 * 60 * 60))); // Convert to hours, minimum 1 hour
-          console.log(`Calculated from event duration: ${hours} hours`);
+        const wasAttended = participationInTxn.attendance;
+        participationInTxn.attendance = attended;
+        participationInTxn.attendanceDate = attended ? new Date() : null;
+        participationInTxn.status = attended ? 'attended' : participationInTxn.status;
+
+        // Calculate volunteer hours if marking as attended
+        if (attended && !wasAttended) {
+          console.log('\n📊 Calculating volunteer hours...');
+          // Use provided hours or calculate from event duration
+          let hours = typeof volunteerHours !== 'undefined' ? Number(volunteerHours) : undefined;
+          if (typeof hours === 'undefined' || Number.isNaN(hours)) {
+            if (participationInTxn.event) {
+              // Calculate hours from event start and end date (in hours)
+              const startDate = new Date(participationInTxn.event.startDate);
+              const endDate = new Date(participationInTxn.event.endDate);
+              const durationInMs = endDate - startDate;
+              hours = Math.max(1, Math.round(durationInMs / (1000 * 60 * 60))); // Convert to hours, minimum 1 hour
+              console.log(`Calculated from event duration: ${hours} hours`);
+            } else {
+              hours = 1;
+            }
+          }
+
+          // Determine maximum allowed hours: event duration in hours + 2 hour buffer
+          let maxAllowed = 24;
+          if (participationInTxn.event && participationInTxn.event.startDate && participationInTxn.event.endDate) {
+            const durationInMs = new Date(participationInTxn.event.endDate) - new Date(participationInTxn.event.startDate);
+            const durationHours = Math.max(0, Math.round(durationInMs / (1000 * 60 * 60)));
+            maxAllowed = Math.max(1, durationHours + 2);
+          }
+
+          if (hours < 0 || hours > maxAllowed) {
+            const error = new Error(`volunteerHours must be between 0 and ${maxAllowed}`);
+            error.statusCode = 400;
+            throw error;
+          }
+
+          participationInTxn.volunteerHours = hours; // set validated hours
+          console.log(`Final hours to add: ${participationInTxn.volunteerHours}`);
+
+          // Add hours to student's total
+          const student = await User.findById(participationInTxn.student._id || participationInTxn.student).session(session);
+          if (student) {
+            const oldTotal = student.totalVolunteerHours || 0;
+            student.totalVolunteerHours = oldTotal + participationInTxn.volunteerHours;
+            await student.save({ session });
+            console.log(`✅ HOURS UPDATED!`);
+            console.log(`   Student: ${student.name}`);
+            console.log(`   Previous Total: ${oldTotal} hours`);
+            console.log(`   Added: ${participationInTxn.volunteerHours} hours`);
+            console.log(`   New Total: ${student.totalVolunteerHours} hours`);
+          } else {
+            console.log('❌ ERROR: Student not found!');
+          }
+        } else if (!attended && wasAttended) {
+          console.log('\n⚠️ Unmarking attendance - removing hours...');
+          // If unmarking attendance, subtract the hours
+          const student = await User.findById(participationInTxn.student._id || participationInTxn.student).session(session);
+          if (student && participationInTxn.volunteerHours) {
+            const oldTotal = student.totalVolunteerHours || 0;
+            student.totalVolunteerHours = Math.max(0, oldTotal - participationInTxn.volunteerHours);
+            await student.save({ session });
+            console.log(`⚠️ HOURS REMOVED!`);
+            console.log(`   Student: ${student.name}`);
+            console.log(`   Previous Total: ${oldTotal} hours`);
+            console.log(`   Removed: ${participationInTxn.volunteerHours} hours`);
+            console.log(`   New Total: ${student.totalVolunteerHours} hours`);
+          }
+          participationInTxn.volunteerHours = 0;
         } else {
-          hours = 1;
+          console.log('ℹ️ No hours change needed (wasAttended:', wasAttended, ', attended:', attended, ')');
         }
-      }
 
-      // Determine maximum allowed hours: event duration in hours + 2 hour buffer
-      let maxAllowed = 24;
-      if (participation.event && participation.event.startDate && participation.event.endDate) {
-        const durationInMs = new Date(participation.event.endDate) - new Date(participation.event.startDate);
-        const durationHours = Math.max(0, Math.round(durationInMs / (1000 * 60 * 60)));
-        maxAllowed = Math.max(1, durationHours + 2);
+        await participationInTxn.save({ session });
+      });
+    } catch (txnError) {
+      if (txnError.statusCode) {
+        return res.status(txnError.statusCode).json({ message: txnError.message });
       }
-
-      if (hours < 0 || hours > maxAllowed) {
-        return res.status(400).json({ message: `volunteerHours must be between 0 and ${maxAllowed}` });
-      }
-
-      participation.volunteerHours = hours; // set validated hours
-      console.log(`Final hours to add: ${participation.volunteerHours}`);
-
-      // Add hours to student's total
-      const student = await User.findById(participation.student._id || participation.student);
-      if (student) {
-        const oldTotal = student.totalVolunteerHours || 0;
-        student.totalVolunteerHours = oldTotal + participation.volunteerHours;
-        await student.save();
-        console.log(`✅ HOURS UPDATED!`);
-        console.log(`   Student: ${student.name}`);
-        console.log(`   Previous Total: ${oldTotal} hours`);
-        console.log(`   Added: ${participation.volunteerHours} hours`);
-        console.log(`   New Total: ${student.totalVolunteerHours} hours`);
-      } else {
-        console.log('❌ ERROR: Student not found!');
-      }
-    } else if (!attended && wasAttended) {
-      console.log('\n⚠️ Unmarking attendance - removing hours...');
-      // If unmarking attendance, subtract the hours
-      const student = await User.findById(participation.student._id || participation.student);
-      if (student && participation.volunteerHours) {
-        const oldTotal = student.totalVolunteerHours || 0;
-        student.totalVolunteerHours = Math.max(0, oldTotal - participation.volunteerHours);
-        await student.save();
-        console.log(`⚠️ HOURS REMOVED!`);
-        console.log(`   Student: ${student.name}`);
-        console.log(`   Previous Total: ${oldTotal} hours`);
-        console.log(`   Removed: ${participation.volunteerHours} hours`);
-        console.log(`   New Total: ${student.totalVolunteerHours} hours`);
-      }
-      participation.volunteerHours = 0;
-    } else {
-      console.log('ℹ️ No hours change needed (wasAttended:', wasAttended, ', attended:', attended, ')');
+      throw txnError;
+    } finally {
+      session.endSession();
     }
-
-    await participation.save();
     console.log('✅ Participation saved');
+
+    participation = await Participation.findById(participation._id)
+      .populate('student', 'name email studentId totalVolunteerHours')
+      .populate('event', 'title eventType');
+
+    // Record audit log for attendance changes
+    try {
+      await AuditLog.create({
+        action: attended ? 'attendance_marked' : 'attendance_unmarked',
+        actor: req.user._id,
+        targetModel: 'Participation',
+        targetId: participation._id,
+        details: {
+          eventId: participation.event._id,
+          studentId: participation.student._id,
+          attendance: participation.attendance,
+          volunteerHours: participation.volunteerHours,
+          timestamp: new Date(),
+          forced: req.body.force === true || req.body.force === 'true' || false
+        }
+      });
+    } catch (logErr) {
+      console.error('Failed to write AuditLog for attendance change:', logErr);
+    }
 
     await participation.populate('student', 'name email studentId totalVolunteerHours');
     await participation.populate('event', 'title eventType');

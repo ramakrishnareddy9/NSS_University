@@ -20,24 +20,30 @@ router.get('/landing', async (req, res) => {
     const departments = await User.distinct('department', { role: 'student' });
     const totalInstitutions = departments.filter(d => d && d.trim() !== '').length || 1;
 
-    // Calculate total hours of service
-    // Sum up all event durations or participation hours
-    const events = await Event.find({}, 'duration');
-    const totalHours = events.reduce((sum, event) => {
-      // Assuming duration is in hours, or calculate from event dates
-      return sum + (event.duration || 0);
-    }, 0);
+    // Calculate total volunteer hours from actual recorded values
+    const userHoursResult = await User.aggregate([
+      { $match: { role: 'student' } },
+      { $group: { _id: null, totalHours: { $sum: { $ifNull: ['$totalVolunteerHours', 0] } } } }
+    ]);
+    const userTotalHours = userHoursResult.length > 0 ? userHoursResult[0].totalHours : 0;
 
-    // Alternative: Calculate from participations
+    // Fallback: sum participation hours for attended records
+    const participationHoursResult = await Participation.aggregate([
+      { $match: { attendance: true } },
+      { $group: { _id: null, totalHours: { $sum: { $ifNull: ['$volunteerHours', 0] } } } }
+    ]);
+    const participationTotalHours = participationHoursResult.length > 0 ? participationHoursResult[0].totalHours : 0;
+
+    const totalHours = Math.max(userTotalHours, participationTotalHours);
+
     const participations = await Participation.countDocuments({ status: 'approved' });
-    const estimatedHours = participations * 8; // Assuming average 8 hours per participation
 
     res.json({
       success: true,
       totalStudents,
       totalEvents,
       totalInstitutions,
-      totalHours: Math.max(totalHours, estimatedHours),
+      totalHours,
       participations
     });
   } catch (error) {

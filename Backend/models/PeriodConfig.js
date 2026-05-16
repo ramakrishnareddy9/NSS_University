@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 
+const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 const periodConfigSchema = new mongoose.Schema({
   academicYear: {
     type: String,
@@ -14,11 +16,13 @@ const periodConfigSchema = new mongoose.Schema({
       },
       startTime: {
         type: String,
-        required: true
+        required: true,
+        match: timePattern
       },
       endTime: {
         type: String,
-        required: true
+        required: true,
+        match: timePattern
       }
     }],
     '2nd': [{
@@ -28,11 +32,13 @@ const periodConfigSchema = new mongoose.Schema({
       },
       startTime: {
         type: String,
-        required: true
+        required: true,
+        match: timePattern
       },
       endTime: {
         type: String,
-        required: true
+        required: true,
+        match: timePattern
       }
     }],
     '3rd': [{
@@ -42,11 +48,13 @@ const periodConfigSchema = new mongoose.Schema({
       },
       startTime: {
         type: String,
-        required: true
+        required: true,
+        match: timePattern
       },
       endTime: {
         type: String,
-        required: true
+        required: true,
+        match: timePattern
       }
     }],
     '4th': [{
@@ -56,11 +64,13 @@ const periodConfigSchema = new mongoose.Schema({
       },
       startTime: {
         type: String,
-        required: true
+        required: true,
+        match: timePattern
       },
       endTime: {
         type: String,
-        required: true
+        required: true,
+        match: timePattern
       }
     }],
     'PG': [{
@@ -70,11 +80,13 @@ const periodConfigSchema = new mongoose.Schema({
       },
       startTime: {
         type: String,
-        required: true
+        required: true,
+        match: timePattern
       },
       endTime: {
         type: String,
-        required: true
+        required: true,
+        match: timePattern
       }
     }]
   },

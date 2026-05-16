@@ -5,6 +5,8 @@ const Contribution = require('../models/Contribution');
 const Event = require('../models/Event');
 const { auth, authorize } = require('../middleware/auth');
 const escapeRegex = require('../utils/escapeRegex');
+const validateObjectId = require('../middleware/validateObjectId');
+const { getPagination, buildPagedResponse } = require('../utils/pagination');
 
 const router = express.Router();
 
@@ -29,11 +31,16 @@ router.get('/', [auth, authorize('admin', 'faculty')], async (req, res) => {
       ];
     }
 
+    const { page, limit, skip } = getPagination(req);
+    const total = await User.countDocuments(query);
+
     const users = await User.find(query)
       .select('-password')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
 
-    res.json(users);
+    res.json(buildPagedResponse(users, total, page, limit));
   } catch (error) {
     console.error('Get users error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -79,10 +86,12 @@ router.get('/stats', [auth, authorize('admin', 'faculty')], async (req, res) => 
   }
 });
 
+const appConfig = require('../config/appConfig');
+
 // @route   GET /api/users/student/:id
 // @desc    Get student profile with details
 // @access  Private
-router.get('/student/:id', auth, async (req, res) => {
+router.get('/student/:id', auth, validateObjectId('id'), async (req, res) => {
   try {
     // Students can only view their own profile
     if (req.user.role === 'student' && req.user.id !== req.params.id) {
@@ -110,7 +119,7 @@ router.get('/student/:id', auth, async (req, res) => {
       contributions,
       totalEvents: participations.length,
       totalHours: student.totalVolunteerHours,
-      certificateEligible: student.totalVolunteerHours >= 120 // Example: 120 hours for certificate
+      certificateEligible: student.totalVolunteerHours >= (appConfig.CERTIFICATE_HOURS_REQUIRED || 120)
     });
   } catch (error) {
     console.error('Get student profile error:', error);

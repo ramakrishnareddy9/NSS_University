@@ -2,7 +2,11 @@ const Problem = require('../models/Problem');
 const User = require('../models/User');
 const Event = require('../models/Event');
 const Notification = require('../models/Notification');
+const mongoose = require('mongoose');
 const { sendEmail, sendNewEventNotification } = require('../utils/notifications');
+const AuditLog = require('../models/AuditLog');
+const appConfig = require('../config/appConfig');
+const { getPagination, buildPagedResponse } = require('../utils/pagination');
 
 // Points configuration
 const POINTS_CONFIG = {
@@ -128,16 +132,20 @@ exports.getProblems = async (req, res) => {
     if (category) query.category = category;
     if (severity) query.severity = severity;
 
+    const { page, limit, skip } = getPagination(req);
+    const total = await Problem.countDocuments(query);
+
     const problems = await Problem.find(query)
       .populate('reportedBy', 'name email studentId department')
       .populate('reviewedBy', 'name email')
       .populate('eventId', 'title date location')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
 
     res.status(200).json({
       success: true,
-      count: problems.length,
-      data: problems
+      ...buildPagedResponse(problems, total, page, limit)
     });
   } catch (error) {
     console.error('Error fetching problems:', error);
@@ -265,51 +273,106 @@ exports.approveProblem = async (req, res) => {
     const eventStartDate = eventDate ? new Date(eventDate) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const eventEndDate = new Date(eventStartDate);
     eventEndDate.setHours(eventStartDate.getHours() + 4); // Default 4-hour event
-    const regDeadline = new Date(eventStartDate);
+    let regDeadline = new Date(eventStartDate);
     regDeadline.setDate(regDeadline.getDate() - 1); // Registration closes 1 day before
 
-    const event = await Event.create({
-      title: `Community Service: ${problem.title}`,
-      description: `${problem.description}\n\n${additionalDetails || ''}`,
-      eventType: categoryToEventType[problem.category] || 'other',
-      location: problem.location.address,
-      startDate: eventStartDate,
-      endDate: eventEndDate,
-      registrationDeadline: regDeadline,
-      images: problem.images.map(url => ({ url, publicId: null })),
-      organizer: req.user._id,
-      status: 'published',
-      isProblemResolution: true,
-      relatedProblemId: problem._id
-    });
-
-    // Calculate points
-    let pointsToAward = POINTS_CONFIG.PROBLEM_APPROVED;
-    
-    if (problem.severity === 'high') {
-      pointsToAward += POINTS_CONFIG.HIGH_SEVERITY_BONUS;
-    } else if (problem.severity === 'critical') {
-      pointsToAward += POINTS_CONFIG.CRITICAL_SEVERITY_BONUS;
+    // Enforce a minimum registration lead time so students have time to register
+    const now = new Date();
+    const minLeadHours = parseInt(appConfig.MIN_REGISTRATION_LEAD_HOURS, 10) || 2;
+    const minAllowedDeadline = new Date(now.getTime() + minLeadHours * 60 * 60 * 1000);
+    let registrationDeadlineAdjusted = false;
+    let originalRegistrationDeadline = null;
+    if (regDeadline < now) {
+      originalRegistrationDeadline = regDeadline;
+      regDeadline = minAllowedDeadline;
+      registrationDeadlineAdjusted = true;
     }
 
-    // Update problem
-    problem.status = 'approved';
-    problem.visibility = 'public';
-    problem.reviewedBy = req.user._id;
-    problem.reviewedAt = new Date();
-    problem.eventId = event._id;
-    problem.pointsAwarded = pointsToAward;
-    await problem.save();
+    const session = await mongoose.startSession();
+    let event;
+    let reporter;
 
-    // Award points to reporter
-    const reporter = await User.findById(problem.reportedBy._id);
-    reporter.rewardPoints += pointsToAward;
-    reporter.reportingScore += pointsToAward;
-    reporter.problemsApproved += 1;
+    try {
+      await session.withTransaction(async () => {
+        // Calculate points
+        let pointsToAward = POINTS_CONFIG.PROBLEM_APPROVED;
+        
+        if (problem.severity === 'high') {
+          pointsToAward += POINTS_CONFIG.HIGH_SEVERITY_BONUS;
+        } else if (problem.severity === 'critical') {
+          pointsToAward += POINTS_CONFIG.CRITICAL_SEVERITY_BONUS;
+        }
 
-    // Check and award badges
-    await checkAndAwardBadges(reporter);
-    await reporter.save();
+        event = await Event.create([{
+          title: `Community Service: ${problem.title}`,
+          description: `${problem.description}\n\n${additionalDetails || ''}`,
+          eventType: categoryToEventType[problem.category] || 'other',
+          location: problem.location.address,
+          startDate: eventStartDate,
+          endDate: eventEndDate,
+          registrationDeadline: regDeadline,
+          images: problem.images.map(url => ({ url, publicId: null })),
+          organizer: req.user._id,
+          status: 'published',
+          isProblemResolution: true,
+          relatedProblemId: problem._id
+        }], { session }).then(docs => docs[0]);
+
+        // Update problem
+        problem.status = 'approved';
+        problem.visibility = 'public';
+        problem.reviewedBy = req.user._id;
+        problem.reviewedAt = new Date();
+        problem.eventId = event._id;
+        problem.pointsAwarded = pointsToAward;
+        await problem.save({ session });
+
+        // Award points to reporter
+        reporter = await User.findById(problem.reportedBy._id).session(session);
+        reporter.rewardPoints += pointsToAward;
+        reporter.reportingScore += pointsToAward;
+        reporter.problemsApproved += 1;
+
+        // Check and award badges
+        await checkAndAwardBadges(reporter);
+        await reporter.save({ session });
+      });
+    } finally {
+      session.endSession();
+    }
+
+    if (registrationDeadlineAdjusted) {
+      try {
+        await AuditLog.create({
+          action: 'registration_deadline_adjusted',
+          actor: req.user._id,
+          targetModel: 'Problem',
+          targetId: problem._id,
+          details: {
+            originalDeadline: originalRegistrationDeadline,
+            adjustedDeadline: regDeadline,
+            minLeadHours,
+            note: 'Registration deadline was earlier than now; adjusted to provide minimum lead time'
+          }
+        });
+      } catch (logErr) {
+        console.error('Failed to write AuditLog for registration deadline adjustment:', logErr);
+      }
+
+      try {
+        await Notification.create({
+          user: req.user._id,
+          type: 'reg-deadline-warning',
+          message: `Registration deadline for event created from problem "${problem.title}" was in the past and was adjusted to ${regDeadline.toISOString()}`,
+          data: { problemId: problem._id, adjustedDeadline: regDeadline },
+          read: false
+        });
+      } catch (notifyErr) {
+        console.error('Failed to create admin notification for reg-deadline adjustment:', notifyErr);
+      }
+    }
+
+    const pointsToAward = problem.pointsAwarded;
 
     // Send notification to reporter
     try {
@@ -557,7 +620,6 @@ exports.getLeaderboard = async (req, res) => {
           userId: '$_id',
           problemsCount: 1,
           name: '$user.name',
-          email: '$user.email',
           studentId: '$user.studentId',
           department: '$user.department',
           rewardPoints: '$user.rewardPoints',
@@ -570,10 +632,17 @@ exports.getLeaderboard = async (req, res) => {
 
     const topReporters = await Problem.aggregate(pipeline);
 
+    const safeTopReporters = topReporters.map(({ name, department, rewardPoints, badges }) => ({
+      name,
+      department,
+      points: rewardPoints,
+      badges
+    }));
+
     res.status(200).json({
       success: true,
-      count: topReporters.length,
-      data: topReporters
+      count: safeTopReporters.length,
+      data: safeTopReporters
     });
   } catch (error) {
     console.error('Error fetching leaderboard:', error);

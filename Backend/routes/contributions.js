@@ -4,6 +4,8 @@ const Contribution = require('../models/Contribution');
 const Participation = require('../models/Participation');
 const User = require('../models/User');
 const { auth, authorize } = require('../middleware/auth');
+const validateObjectId = require('../middleware/validateObjectId');
+const { getPagination, buildPagedResponse } = require('../utils/pagination');
 const { sendContributionVerified } = require('../utils/notifications');
 
 const router = express.Router();
@@ -30,14 +32,19 @@ router.get('/', auth, async (req, res) => {
       query.isVerified = req.query.isVerified === 'true';
     }
 
+    const { page, limit, skip } = getPagination(req);
+    const total = await Contribution.countDocuments(query);
+
     const contributions = await Contribution.find(query)
       .populate('student', 'name email studentId department')
       .populate('event', 'title eventType startDate endDate')
       .populate('participation')
       .populate('verifiedBy', 'name email')
-      .sort({ submittedAt: -1 });
+      .sort({ submittedAt: -1 })
+      .skip(skip)
+      .limit(limit);
 
-    res.json(contributions);
+    res.json(buildPagedResponse(contributions, total, page, limit));
   } catch (error) {
     console.error('Get contributions error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -125,7 +132,7 @@ router.post('/', [
 // @route   PUT /api/contributions/:id/verify
 // @desc    Verify contribution
 // @access  Private (Admin/Faculty only)
-router.put('/:id/verify', [auth, authorize('admin', 'faculty')], async (req, res) => {
+router.put('/:id/verify', [auth, authorize('admin', 'faculty'), validateObjectId('id')], async (req, res) => {
   try {
     const contribution = await Contribution.findById(req.params.id);
 

@@ -85,6 +85,7 @@ const eventSchema = new mongoose.Schema({
     })
   },
   certificatesSent: { type: Boolean, default: false },
+  notificationsSent: { type: Boolean, default: false },
   // Problem Resolution Event fields
   isProblemResolution: {
     type: Boolean,
@@ -97,6 +98,9 @@ const eventSchema = new mongoose.Schema({
 }, {
   timestamps: true
 });
+
+eventSchema.index({ status: 1, startDate: 1 });
+eventSchema.index({ startDate: 1, endDate: 1 });
 
 module.exports = mongoose.model('Event', eventSchema);
 
