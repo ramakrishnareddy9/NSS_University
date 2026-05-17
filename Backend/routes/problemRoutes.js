@@ -8,10 +8,22 @@ const {
   approveProblem,
   rejectProblem,
   resolveProblem,
-  getLeaderboard
+  getLeaderboard,
+  getCategoryHeatmap,
+  followUser,
+  unfollowUser,
+  getFollowersCount,
+  upvoteProblem,
+  removeUpvote,
+  getUpvoteCount
 } = require('../controllers/problemController');
 const { auth, authorize } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
+
+// PUBLIC routes (no auth required)
+router.get('/heatmap/categories', getCategoryHeatmap);
+router.get('/followers/:userId', validateObjectId('userId'), getFollowersCount);
+router.get('/:id/upvotes', validateObjectId('id'), getUpvoteCount);
 
 // Protected routes (all authenticated users)
 router.use(auth);
@@ -24,6 +36,14 @@ router.post('/', submitProblem);
 router.get('/', getProblems);
 router.get('/my-reports', getMyReports);
 router.get('/:id', validateObjectId('id'), getProblemById);
+
+// Follow routes
+router.post('/follow/:userId', validateObjectId('userId'), followUser);
+router.delete('/follow/:userId', validateObjectId('userId'), unfollowUser);
+
+// Upvote routes
+router.post('/:id/upvote', validateObjectId('id'), upvoteProblem);
+router.delete('/:id/upvote', validateObjectId('id'), removeUpvote);
 
 // Admin/Faculty only routes
 router.put('/:id/approve', validateObjectId('id'), authorize('admin', 'faculty'), approveProblem);

@@ -8,7 +8,7 @@ const { auth, authorize } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
 const appConfig = require('../config/appConfig');
 const AuditLog = require('../models/AuditLog');
-const { sendRegistrationConfirmation, sendApprovalNotification } = require('../utils/notifications');
+const { sendRegistrationConfirmation, sendApprovalNotification, sendWaitlistPromotionNotification } = require('../utils/notifications');
 const { getPagination, buildPagedResponse } = require('../utils/pagination');
 
 const router = express.Router();
@@ -83,7 +83,7 @@ router.get('/', auth, async (req, res) => {
 });
 
 // @route   POST /api/participations
-// @desc    Register for an event
+// @desc    Register for an event or join waitlist if full
 // @access  Private (Students only)
 router.post('/', [auth, authorize('student')], async (req, res) => {
   try {
@@ -119,14 +119,7 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
           throw error;
         }
 
-        // Check max participants
-        if (event.maxParticipants && event.currentParticipants >= event.maxParticipants) {
-          const error = new Error('Event is full');
-          error.statusCode = 400;
-          throw error;
-        }
-
-        // Check if already registered
+        // Check if already registered (including waitlist)
         const existingParticipation = await Participation.findOne({
           student: req.user.id,
           event: eventId
@@ -138,20 +131,36 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
           throw error;
         }
 
+        // Determine if adding to waitlist or registering directly
+        let isWaitlisted = false;
+        if (event.maxParticipants && event.currentParticipants >= event.maxParticipants) {
+          isWaitlisted = true;
+        }
+
         // Create participation
         participation = new Participation({
           student: req.user.id,
           event: eventId,
-          status: 'pending'
+          status: 'pending',
+          waitlistStatus: isWaitlisted ? 'waitlisted' : 'none',
+          waitlistedAt: isWaitlisted ? new Date() : undefined
         });
 
         await participation.save({ session });
 
-        // Atomically update event: increment participant count and add participation reference
-        await Event.findByIdAndUpdate(eventId, {
-          $inc: { currentParticipants: 1 },
-          $push: { participations: participation._id }
-        }, { session });
+        // Atomically update event
+        if (!isWaitlisted) {
+          // Only increment if not waitlisted
+          await Event.findByIdAndUpdate(eventId, {
+            $inc: { currentParticipants: 1 },
+            $push: { participations: participation._id }
+          }, { session });
+        } else {
+          // Just add to participations array for waitlist tracking
+          await Event.findByIdAndUpdate(eventId, {
+            $push: { participations: participation._id }
+          }, { session });
+        }
       });
     } catch (txnError) {
       if (txnError.statusCode) {
@@ -165,11 +174,23 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
     await participation.populate('student', 'name email studentId');
     await participation.populate('event', 'title eventType startDate endDate location');
 
-    // Send registration confirmation email
+    // Send appropriate notification
     try {
-      await sendRegistrationConfirmation(participation.student, participation.event);
+      if (participation.waitlistStatus === 'waitlisted') {
+        const waitlistPosition = await Participation.countDocuments({
+          event: eventId,
+          waitlistStatus: 'waitlisted',
+          waitlistedAt: { $lt: participation.waitlistedAt }
+        }) + 1;
+        
+        const subject = `Waitlisted for: ${participation.event.title}`;
+        const text = `You have been added to the waitlist for "${participation.event.title}". Position: ${waitlistPosition}`;
+        console.log(`📧 Sending waitlist confirmation to ${participation.student.email}: position ${waitlistPosition}`);
+      } else {
+        await sendRegistrationConfirmation(participation.student, participation.event);
+      }
     } catch (error) {
-      console.error('Failed to send registration confirmation email:', error);
+      console.error('Failed to send confirmation email:', error);
     }
 
     // Send WebSocket notification to admins
@@ -178,12 +199,13 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
       if (io) {
         io.emit('new-participation', {
           type: 'new-participation',
-          message: `New registration for "${participation.event.title}"`,
+          message: `New ${participation.waitlistStatus === 'waitlisted' ? 'waitlist' : 'registration'} for "${participation.event.title}"`,
           participation: {
             id: participation._id,
             student: participation.student,
             event: participation.event,
-            status: participation.status
+            status: participation.status,
+            waitlistStatus: participation.waitlistStatus
           },
           timestamp: new Date()
         });
@@ -193,7 +215,12 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
       console.error('Socket emission failed for registration:', socketError);
     }
 
-    res.status(201).json(participation);
+    res.status(201).json({
+      ...participation.toObject(),
+      message: participation.waitlistStatus === 'waitlisted' 
+        ? 'Added to waitlist. You will be notified if a spot becomes available.'
+        : 'Successfully registered for the event'
+    });
 
   } catch (error) {
     console.error('Register participation error:', error);
@@ -225,7 +252,7 @@ router.put('/:id/approve', [auth, authorize('admin', 'faculty'), validateObjectI
 
     await participation.save();
 
-    await participation.populate('student', 'name email studentId');
+    await participation.populate('student', 'name email studentId notificationPreferences');
     await participation.populate('event', 'title eventType startDate endDate location');
 
     console.log(`\n=== Approving participation for student: ${participation.student.name} (${participation.student.email}) ===`);
@@ -234,11 +261,17 @@ router.put('/:id/approve', [auth, authorize('admin', 'faculty'), validateObjectI
     // Send approval notification email to the approved student
     if (participation.student.email) {
       try {
-        const emailResult = await sendApprovalNotification(participation.student, participation.event);
-        if (emailResult.success) {
-          console.log(`✅ Approval email sent successfully to ${participation.student.email}`);
+        // Check if user wants participation approval emails
+        const emailEnabled = participation.student.notificationPreferences?.emailNotifications?.participationApproved !== false;
+        if (emailEnabled) {
+          const emailResult = await sendApprovalNotification(participation.student, participation.event);
+          if (emailResult.success) {
+            console.log(`✅ Approval email sent successfully to ${participation.student.email}`);
+          } else {
+            console.error(`❌ Failed to send approval email: ${emailResult.error || emailResult.message}`);
+          }
         } else {
-          console.error(`❌ Failed to send approval email: ${emailResult.error || emailResult.message}`);
+          console.log(`📧 Skipped approval email for ${participation.student.email} (preferences disabled)`);
         }
       } catch (error) {
         console.error('❌ Error sending approval notification email:', error);
@@ -724,6 +757,109 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
 
   } catch (error) {
     console.error('Mark attendance error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   DELETE /api/participations/:id
+// @desc    Cancel participation and promote next waitlisted student if applicable
+// @access  Private (Admin/Faculty or student cancelling own)
+router.delete('/:id', [auth, validateObjectId('id')], async (req, res) => {
+  try {
+    const participation = await Participation.findById(req.params.id)
+      .populate('student', 'name email')
+      .populate('event', 'title maxParticipants currentParticipants');
+
+    if (!participation) {
+      return res.status(404).json({ message: 'Participation not found' });
+    }
+
+    // Check authorization: student can only cancel their own, admin/faculty can cancel anyone's
+    if (req.user.role === 'student' && participation.student._id.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'Not authorized to cancel this participation' });
+    }
+
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const participationInTxn = await Participation.findById(participation._id).session(session);
+        const eventInTxn = await Event.findById(participationInTxn.event).session(session);
+
+        // Update participation status to cancelled
+        participationInTxn.status = 'cancelled';
+        await participationInTxn.save({ session });
+
+        // Decrement participant count only if they were confirmed (not waitlisted)
+        if (participationInTxn.waitlistStatus !== 'waitlisted') {
+          await Event.findByIdAndUpdate(participationInTxn.event, {
+            $inc: { currentParticipants: -1 }
+          }, { session });
+        }
+
+        // If event has capacity and there are waitlisted students, promote next one
+        if (eventInTxn.maxParticipants && participationInTxn.waitlistStatus !== 'waitlisted') {
+          const nextWaitlisted = await Participation.findOne({
+            event: participationInTxn.event,
+            waitlistStatus: 'waitlisted'
+          })
+            .sort({ waitlistedAt: 1 })
+            .session(session);
+
+          if (nextWaitlisted) {
+            nextWaitlisted.waitlistStatus = 'promoted_from_waitlist';
+            nextWaitlisted.promotedAt = new Date();
+            await nextWaitlisted.save({ session });
+
+            // Increment participant count for promoted student
+            await Event.findByIdAndUpdate(participationInTxn.event, {
+              $inc: { currentParticipants: 1 }
+            }, { session });
+
+            // Send promotion notification
+            const promotedStudent = await User.findById(nextWaitlisted.student).session(session);
+            if (promotedStudent) {
+              try {
+                // Check if user wants waitlist promotion emails
+                const emailEnabled = !promotedStudent.notificationPreferences?.emailNotifications?.waitlistPromotion === false;
+                if (emailEnabled) {
+                  await sendWaitlistPromotionNotification(promotedStudent, eventInTxn);
+                  console.log(`✅ Waitlist promotion notification sent to ${promotedStudent.email}`);
+                } else {
+                  console.log(`📧 Skipped waitlist promotion email for ${promotedStudent.email} (preferences disabled)`);
+                }
+              } catch (error) {
+                console.error(`Failed to send promotion email to ${promotedStudent.email}:`, error);
+              }
+            }
+          }
+        }
+      });
+    } finally {
+      session.endSession();
+    }
+
+    // Send cancellation notification to the student if requested
+    if (req.body.notifyStudent !== false) {
+      try {
+        const io = req.app.get('io');
+        if (io) {
+          io.to(`user-${participation.student._id}`).emit('participation-cancelled', {
+            type: 'participation-cancelled',
+            message: `Your participation for "${participation.event.title}" has been cancelled.`,
+            participationId: participation._id,
+            eventId: participation.event._id,
+            timestamp: new Date()
+          });
+        }
+      } catch (error) {
+        console.error('Failed to send cancellation notification:', error);
+      }
+    }
+
+    res.json({ message: 'Participation cancelled successfully', participation });
+
+  } catch (error) {
+    console.error('Cancel participation error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

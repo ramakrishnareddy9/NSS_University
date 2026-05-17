@@ -29,6 +29,25 @@ if (process.env.BREVO_API_KEY) {
   console.log('Get your API key from: https://app.brevo.com/settings/keys/api');
 }
 
+/**
+ * Check if user has enabled email notifications for a specific type
+ * @param {Object} user - User document with notificationPreferences
+ * @param {String} notificationType - Type of notification (newEvent, participationApproved, etc.)
+ * @returns {Boolean} - Whether email notifications are enabled for this type
+ */
+const isEmailNotificationEnabled = (user, notificationType) => {
+  if (!user || !user.notificationPreferences) {
+    return true; // Default to true if preferences not set
+  }
+  
+  const prefs = user.notificationPreferences.emailNotifications;
+  if (!prefs) return true;
+  
+  // Map notification types to preference keys
+  const prefKey = notificationType;
+  return prefs[prefKey] !== false; // Default to true if not explicitly disabled
+};
+
 // Send email notification using Brevo
 const sendEmail = async (to, subject, text, html) => {
   try {
@@ -360,8 +379,138 @@ const sendPasswordEmail = async (user, password) => {
   return result;
 };
 
+// Send event cancellation notification
+const sendEventCancellationNotification = async (event, students, cancellationReason) => {
+  console.log(`📧 Sending event cancellation emails for event: ${event.title}`);
+
+  if (!students || students.length === 0) {
+    console.warn(`⚠️ No students to notify for cancellation of event: ${event.title}`);
+    return { success: true, notificationsSent: 0 };
+  }
+
+  let notificationsSent = 0;
+  const failedEmails = [];
+
+  for (const student of students) {
+    if (!student.email) {
+      console.warn(`⚠️ Student ${student.name} has no email address, skipping`);
+      failedEmails.push(student.email);
+      continue;
+    }
+
+    const subject = `⚠️ Event Cancelled: ${event.title}`;
+    const eventDate = event.startDate.toLocaleDateString();
+    
+    const text = `Dear ${student.name},\n\nWe regret to inform you that the following event has been cancelled:\n\nEvent: ${event.title}\nOriginal Date: ${eventDate}\nLocation: ${event.location}\n\n${cancellationReason ? `Reason for Cancellation: ${cancellationReason}\n` : ''}If you had registered for this event, your registration has been cancelled and you will not be marked as a participant.\n\nIf you have any questions, please contact the NSS coordinator.\n\nBest regards,\nNSS Portal Team`;
+    
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background-color: #fee2e2; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #dc2626;">
+          <h2 style="color: #dc2626; margin-top: 0;">⚠️ Event Cancelled</h2>
+        </div>
+        
+        <p>Dear ${student.name},</p>
+        <p>We regret to inform you that the following event has been <strong>cancelled</strong>:</p>
+        
+        <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #6b7280;">
+          <h3 style="color: #1f2937; margin-top: 0;">Event Details:</h3>
+          <p style="margin: 8px 0;"><strong>Event Name:</strong> ${event.title}</p>
+          <p style="margin: 8px 0;"><strong>Original Date:</strong> ${eventDate}</p>
+          <p style="margin: 8px 0;"><strong>Location:</strong> ${event.location}</p>
+          <p style="margin: 8px 0;"><strong>Event Type:</strong> ${event.eventType}</p>
+        </div>
+        
+        ${cancellationReason ? `
+        <div style="background-color: #fef3c7; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #f59e0b;">
+          <p style="margin: 0; color: #92400e;"><strong>Reason for Cancellation:</strong></p>
+          <p style="margin: 8px 0 0 0; color: #92400e;">${cancellationReason}</p>
+        </div>
+        ` : ''}
+        
+        <p>If you had registered for this event, your registration has been cancelled. You will not be marked as a participant.</p>
+        
+        <p>If you have any questions or concerns, please contact the NSS coordinator.</p>
+        
+        <hr style="margin: 30px 0; border: none; border-top: 1px solid #e5e7eb;">
+        <p style="color: #6b7280; font-size: 14px;">Best regards,<br>NSS Portal Team</p>
+      </div>
+    `;
+
+    try {
+      const result = await sendEmail(student.email, subject, text, html);
+      if (result.success) {
+        notificationsSent++;
+      } else {
+        failedEmails.push(student.email);
+      }
+    } catch (error) {
+      console.error(`Error sending cancellation email to ${student.email}:`, error);
+      failedEmails.push(student.email);
+    }
+  }
+
+  const summary = {
+    success: true,
+    notificationsSent,
+    failedEmails,
+    total: students.length
+  };
+
+  console.log(`✅ Event cancellation notifications completed: ${notificationsSent}/${students.length} sent successfully`);
+  return summary;
+};
+
+// Send waitlist promotion notification
+const sendWaitlistPromotionNotification = async (student, event) => {
+  console.log(`📧 Sending waitlist promotion email to ${student.email} for event: ${event.title}`);
+
+  if (!student.email) {
+    console.warn(`⚠️ Student ${student.name} has no email address, skipping waitlist promotion`);
+    return { success: false, error: 'No email address' };
+  }
+
+  const subject = `🎉 Spot Available: ${event.title}`;
+  const eventDate = event.startDate.toLocaleDateString();
+  
+  const text = `Dear ${student.name},\n\nGreat news! A spot has become available for the following event:\n\nEvent: ${event.title}\nDate: ${eventDate}\nLocation: ${event.location}\n\nYou were promoted from the waitlist. Your registration is now confirmed.\n\nBest regards,\nNSS Portal Team`;
+  
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background-color: #dcfce7; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #16a34a;">
+        <h2 style="color: #16a34a; margin-top: 0;">🎉 Great News!</h2>
+      </div>
+      
+      <p>Dear ${student.name},</p>
+      <p>A spot has become available for the following event, and <strong>you have been promoted from the waitlist</strong>!</p>
+      
+      <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #6b7280;">
+        <h3 style="color: #1f2937; margin-top: 0;">Event Details:</h3>
+        <p style="margin: 8px 0;"><strong>Event Name:</strong> ${event.title}</p>
+        <p style="margin: 8px 0;"><strong>Date:</strong> ${eventDate}</p>
+        <p style="margin: 8px 0;"><strong>Location:</strong> ${event.location}</p>
+        <p style="margin: 8px 0;"><strong>Event Type:</strong> ${event.eventType}</p>
+      </div>
+      
+      <p>Your registration is now <strong>confirmed</strong>. Please make sure to mark your attendance on the day of the event.</p>
+      
+      <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/events" style="background-color: #0ea5e9; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">View Event Details</a></p>
+      
+      <hr style="margin: 30px 0; border: none; border-top: 1px solid #e5e7eb;">
+      <p style="color: #6b7280; font-size: 14px;">Best regards,<br>NSS Portal Team</p>
+    </div>
+  `;
+
+  const result = await sendEmail(student.email, subject, text, html);
+  if (result.success) {
+    console.log(`✅ Waitlist promotion email sent successfully to ${student.email}`);
+  }
+  return result;
+};
+
+
 module.exports = {
   sendEmail,
+  isEmailNotificationEnabled,
   sendRegistrationConfirmation,
   sendApprovalNotification,
   sendEventReminder,
@@ -369,6 +518,8 @@ module.exports = {
   sendNewEventNotification,
   sendPasswordEmail,
   generateOTP,
-  sendPasswordResetOTP
+  sendPasswordResetOTP,
+  sendEventCancellationNotification,
+  sendWaitlistPromotionNotification
 };
 

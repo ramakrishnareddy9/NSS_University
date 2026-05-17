@@ -23,13 +23,26 @@ async function notifyStudentsAboutEvent(event, req) {
     role: 'student',
     isActive: true,
     email: { $exists: true, $ne: null, $ne: '' }
-  }).select('email name _id');
+  }).select('email name _id notificationPreferences');
 
   if (students.length === 0) {
     return;
   }
 
-  sendNewEventNotification(event, students).catch(error => {
+  // Filter students who want new event notifications
+  const studentsToNotify = students.filter(student => {
+    if (!student.notificationPreferences?.emailNotifications) {
+      return true; // Default to true if preferences not set
+    }
+    return student.notificationPreferences.emailNotifications.newEvent !== false;
+  });
+
+  if (studentsToNotify.length === 0) {
+    console.log('📧 No students opted in for new event notifications');
+    return;
+  }
+
+  sendNewEventNotification(event, studentsToNotify).catch(error => {
     console.error('Error sending event notifications:', error);
   });
 
@@ -290,7 +303,7 @@ router.put('/:id', [auth, authorize('admin', 'faculty'), validateObjectId('id')]
 });
 
 // @route   DELETE /api/events/:id
-// @desc    Delete event
+// @desc    Cancel or delete event (soft cancel or hard delete based on status)
 // @access  Private (Admin only)
 router.delete('/:id', [auth, authorize('admin'), validateObjectId('id')], async (req, res) => {
   try {
@@ -299,6 +312,93 @@ router.delete('/:id', [auth, authorize('admin'), validateObjectId('id')], async 
       return res.status(404).json({ message: 'Event not found' });
     }
 
+    const { cancellationReason, hardDelete } = req.body;
+
+    // If event has registered participants and hasn't started, mark as cancelled and notify
+    if (event.status === 'draft' || event.status === 'published') {
+      // Get all registered students (not waitlisted) for notifications
+      const Participation = require('../models/Participation');
+      const registeredParticipations = await Participation.find({
+        event: event._id,
+        waitlistStatus: { $ne: 'waitlisted' },
+        status: { $ne: 'rejected', $ne: 'cancelled' }
+      }).populate('student', 'name email notificationPreferences');
+
+      const registeredStudents = registeredParticipations.map(p => p.student);
+      
+      // Filter students who want event cancellation emails
+      const studentsToNotify = registeredStudents.filter(student => {
+        if (!student.notificationPreferences?.emailNotifications) {
+          return true; // Default to true if preferences not set
+        }
+        return student.notificationPreferences.emailNotifications.eventCancelled !== false;
+      });
+
+      // Mark event as cancelled
+      event.status = 'cancelled';
+      event.cancelledAt = new Date();
+      event.cancelledBy = req.user.id;
+      event.cancellationReason = cancellationReason || 'No reason provided';
+      await event.save();
+
+      // Mark all participations as cancelled
+      await Participation.updateMany(
+        { event: event._id, status: { $ne: 'rejected', $ne: 'cancelled' } },
+        { status: 'cancelled', attendance: false }
+      );
+
+      // Send cancellation emails asynchronously
+      if (studentsToNotify.length > 0) {
+        const { sendEventCancellationNotification } = require('../utils/notifications');
+        try {
+          const emailResult = await sendEventCancellationNotification(event, studentsToNotify, cancellationReason);
+          console.log(`📧 Event cancellation notifications sent: ${emailResult.notificationsSent}/${emailResult.total}`);
+          if (emailResult.failedEmails.length > 0) {
+            console.warn(`⚠️ Failed to send emails to: ${emailResult.failedEmails.join(', ')}`);
+          }
+        } catch (error) {
+          console.error('Error sending cancellation notifications:', error);
+        }
+      } else {
+        console.log('📧 No students opted in for event cancellation notifications');
+      }
+
+      // Broadcast cancellation to connected users
+      try {
+        const io = req.app.get('io');
+        if (io) {
+          io.emit('event-cancelled', {
+            type: 'event-cancelled',
+            message: `Event "${event.title}" has been cancelled.`,
+            event: {
+              id: event._id,
+              title: event.title,
+              cancellationReason: event.cancellationReason
+            },
+            timestamp: new Date()
+          });
+          console.log(`🔔 Event cancellation broadcast sent for: ${event.title}`);
+        }
+      } catch (socketError) {
+        console.error('Socket emission failed for event cancellation:', socketError);
+      }
+
+      return res.json({ 
+        message: 'Event cancelled successfully and notifications sent',
+        event,
+        notificationsSent: registeredStudents.length
+      });
+    }
+
+    // For completed or ongoing events, perform hard delete only if explicitly requested
+    if (hardDelete !== true && (event.status === 'ongoing' || event.status === 'completed')) {
+      return res.status(400).json({ 
+        message: 'Cannot cancel started or completed events. Use hardDelete: true to force delete.',
+        currentStatus: event.status
+      });
+    }
+
+    // Hard delete: remove all related records
     await Participation.deleteMany({ event: event._id });
 
     try {
@@ -313,7 +413,7 @@ router.delete('/:id', [auth, authorize('admin'), validateObjectId('id')], async 
     }
 
     await Event.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Event deleted successfully' });
+    res.json({ message: 'Event permanently deleted' });
   } catch (error) {
     console.error('Delete event error:', error);
     res.status(500).json({ message: 'Server error' });

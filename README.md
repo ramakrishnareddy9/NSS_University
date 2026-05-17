@@ -6,6 +6,7 @@ A comprehensive web-based platform for managing National Service Scheme (NSS) ac
 
 - [Overview](#overview)
 - [Features](#features)
+- [Recent Enhancements](#recent-enhancements)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
@@ -44,6 +45,28 @@ NSS University Activity Portal is a full-stack application designed to streamlin
 - **Report Designer**: Customizable report templates
 - **User Management**: Admin controls for user roles and permissions
 - **Participation Tracking**: Monitor student participation metrics
+- **OD List Management**: Role-protected attendance-duty lists for faculty and admins
+- **OD Letter PDFs**: Department-wise OD letters with faculty countersign fields
+- **Semester Period Config UI**: Academic-year schedule management for semester-level periods
+
+## 🆕 Recent Enhancements
+
+### OD List, PDF Letters, and Period Config Updates
+- OD List routes are now role-protected so only admin and faculty users can access attendance-duty data.
+- Period configuration now validates every stored time in `HH:MM` format.
+- Department-wise OD letter PDFs can be generated for faculty countersignature.
+- A semester-level period configuration UI has been added for creating, editing, and deleting academic-year schedules.
+- The existing OD list Excel download remains available to authorized users.
+
+### Key API Additions
+- `GET /api/od-list/event/:eventId/letter-pdf/:department` - Download a department-specific OD letter PDF.
+- `GET /api/od-list/event/:eventId/departments` - Get participant counts by department for an event.
+- `POST /api/period-config/validate/time` - Validate a time value in `HH:MM` format.
+
+### Access Control Summary
+- OD List routes require `admin` or `faculty`.
+- Period config create, update, and delete routes require `admin`.
+- Period config listing and lookup routes require authentication, with admin/faculty access for the full list.
 
 ## 🛠 Tech Stack
 
@@ -290,6 +313,17 @@ http://localhost:5000/api
 #### Certificates
 - `GET /certificates/generate` - Generate certificate
 
+#### OD List and Period Configuration
+- `GET /od-list/event/:eventId` - Get OD list for an event (Admin/Faculty)
+- `GET /od-list/event/:eventId/download` - Download OD list as Excel (Admin/Faculty)
+- `GET /od-list/event/:eventId/letter-pdf/:department` - Download department-wise OD letter PDF (Admin/Faculty)
+- `GET /od-list/event/:eventId/departments` - Get department-wise participant counts (Admin/Faculty)
+- `GET /period-config` - List period configurations (Admin/Faculty)
+- `POST /period-config` - Create period configuration (Admin)
+- `PUT /period-config/:id` - Update period configuration (Admin)
+- `DELETE /period-config/:id` - Delete period configuration (Admin)
+- `POST /period-config/validate/time` - Validate HH:MM time format
+
 ### Authentication
 All protected routes require a Bearer token in the Authorization header:
 ```
@@ -355,5 +389,4 @@ For support, issues, or feature requests, please create an issue in the GitHub r
 ---
 
 **Made with ❤️ for NSS Activity Management**
-#   N S S _ U n i v e r s i t y  
  

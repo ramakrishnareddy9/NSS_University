@@ -30,6 +30,7 @@ import MyProblemReports from './pages/Student/MyProblemReports';
 import ProblemDashboard from './pages/Admin/ProblemDashboard';
 import InviteUser from './pages/Admin/InviteUser';
 import AcademicYearConfig from './pages/Admin/AcademicYearConfig';
+import EventCapacityAnalytics from './pages/Admin/EventCapacityAnalytics';
 import PeriodConfig from './pages/Admin/PeriodConfig';
 import Leaderboard from './pages/Leaderboard';
 import FacultyDashboard from './pages/Faculty/Dashboard';
@@ -138,6 +139,14 @@ function AppContent() {
               element={
                 <PrivateRoute roles={['admin']}>
                   <AcademicYearConfig />
+                </PrivateRoute>
+              }
+            />
+            <Route
+              path="/admin/event-capacity-analytics"
+              element={
+                <PrivateRoute roles={['admin']}>
+                  <EventCapacityAnalytics />
                 </PrivateRoute>
               }
             />

@@ -101,6 +101,9 @@ const Leaderboard = () => {
           <p className="text-lg text-gray-600 max-w-2xl mx-auto">
             Recognizing students who actively report and help solve community problems
           </p>
+          <p className="text-sm text-blue-600 mt-2 font-medium">
+            ℹ️ Leaderboard data is anonymized to protect student privacy
+          </p>
         </div>
 
         {/* Period Filter */}
@@ -143,14 +146,15 @@ const Leaderboard = () => {
                   <div className="w-20 h-20 bg-gradient-to-br from-gray-200 to-gray-400 rounded-full mx-auto mb-3 flex items-center justify-center">
                     <UserCircleIcon className="w-16 h-16 text-gray-600" />
                   </div>
-                  <h3 className="font-bold text-lg text-gray-900 mb-1">{leaderboard[1].name}</h3>
-                  <p className="text-sm text-gray-600 mb-2">{leaderboard[1].department}</p>
+                  <h3 className="font-bold text-lg text-gray-900 mb-1">{leaderboard[1].anonymousId}</h3>
+                  <p className="text-sm text-gray-600 mb-2">Runner-up</p>
                   <div className="bg-gradient-to-r from-gray-100 to-gray-200 rounded-lg py-2 px-4">
                     <p className="text-2xl font-bold text-gray-700">{leaderboard[1].reportingScore}</p>
                     <p className="text-xs text-gray-600">Points</p>
                   </div>
                   <div className="mt-3 text-sm text-gray-600">
                     <p>{leaderboard[1].problemsApproved} Reports Approved</p>
+                    <p className="text-xs text-gray-500">{leaderboard[1].problemsReported} Total</p>
                   </div>
                 </div>
                 <div className="h-24 bg-gradient-to-t from-gray-300 to-gray-400 rounded-t-lg"></div>
@@ -165,14 +169,15 @@ const Leaderboard = () => {
                   <div className="w-24 h-24 bg-gradient-to-br from-yellow-300 to-yellow-500 rounded-full mx-auto mb-3 flex items-center justify-center animate-pulse">
                     <UserCircleIcon className="w-20 h-20 text-yellow-700" />
                   </div>
-                  <h3 className="font-bold text-xl text-gray-900 mb-1">{leaderboard[0].name}</h3>
-                  <p className="text-sm text-gray-600 mb-2">{leaderboard[0].department}</p>
+                  <h3 className="font-bold text-xl text-gray-900 mb-1">{leaderboard[0].anonymousId}</h3>
+                  <p className="text-sm text-gray-600 mb-2">Champion</p>
                   <div className="bg-gradient-to-r from-yellow-100 to-yellow-200 rounded-lg py-3 px-4">
                     <p className="text-3xl font-bold text-yellow-700">{leaderboard[0].reportingScore}</p>
                     <p className="text-xs text-yellow-600">Points</p>
                   </div>
                   <div className="mt-3 text-sm text-gray-600">
                     <p className="font-semibold">{leaderboard[0].problemsApproved} Reports Approved</p>
+                    <p className="text-xs text-gray-500">{leaderboard[0].problemsReported} Total</p>
                   </div>
                   {leaderboard[0].badges && leaderboard[0].badges.length > 0 && (
                     <div className="mt-3 flex flex-wrap justify-center gap-1">
@@ -196,14 +201,15 @@ const Leaderboard = () => {
                   <div className="w-20 h-20 bg-gradient-to-br from-orange-200 to-orange-400 rounded-full mx-auto mb-3 flex items-center justify-center">
                     <UserCircleIcon className="w-16 h-16 text-orange-600" />
                   </div>
-                  <h3 className="font-bold text-lg text-gray-900 mb-1">{leaderboard[2].name}</h3>
-                  <p className="text-sm text-gray-600 mb-2">{leaderboard[2].department}</p>
+                  <h3 className="font-bold text-lg text-gray-900 mb-1">{leaderboard[2].anonymousId}</h3>
+                  <p className="text-sm text-gray-600 mb-2">Third Place</p>
                   <div className="bg-gradient-to-r from-orange-100 to-orange-200 rounded-lg py-2 px-4">
                     <p className="text-2xl font-bold text-orange-700">{leaderboard[2].reportingScore}</p>
                     <p className="text-xs text-orange-600">Points</p>
                   </div>
                   <div className="mt-3 text-sm text-gray-600">
                     <p>{leaderboard[2].problemsApproved} Reports Approved</p>
+                    <p className="text-xs text-gray-500">{leaderboard[2].problemsReported} Total</p>
                   </div>
                 </div>
                 <div className="h-20 bg-gradient-to-t from-orange-300 to-orange-400 rounded-t-lg"></div>
@@ -218,11 +224,11 @@ const Leaderboard = () => {
             <div className="bg-gradient-to-r from-blue-600 to-blue-700 px-6 py-4">
               <h2 className="text-xl font-bold text-white flex items-center gap-2">
                 <AcademicCapIcon className="w-6 h-6" />
-                Top Contributors
+                Top Contributors (Ranks 4+)
               </h2>
             </div>
             <div className="divide-y divide-gray-200">
-              {leaderboard.slice(3).map((user, index) => (
+              {leaderboard.slice(3).map((user) => (
                 <div
                   key={user._id}
                   className="px-6 py-4 hover:bg-gray-50 transition-colors"
@@ -230,18 +236,16 @@ const Leaderboard = () => {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4 flex-1">
                       <div className="flex-shrink-0">
-                        {getRankBadge(index + 4)}
+                        {getRankBadge(user.rank)}
                       </div>
                       <div className="flex-1">
-                        <h3 className="font-semibold text-gray-900">{user.name}</h3>
+                        <h3 className="font-semibold text-gray-900">{user.anonymousId}</h3>
                         <div className="flex flex-wrap items-center gap-3 text-sm text-gray-600 mt-1">
-                          <span>{user.studentId}</span>
-                          <span className="text-gray-400">•</span>
-                          <span>{user.department}</span>
-                          <span className="text-gray-400">•</span>
                           <span className="text-green-600 font-medium">
                             {user.problemsApproved} Approved
                           </span>
+                          <span className="text-gray-400">•</span>
+                          <span>{user.problemsReported} Reported</span>
                         </div>
                         {user.badges && user.badges.length > 0 && (
                           <div className="flex flex-wrap gap-1 mt-2">

@@ -98,6 +98,22 @@ const userSchema = new mongoose.Schema({
   emailVerified: {
     type: Boolean,
     default: false
+  },
+  // Notification preferences per type
+  notificationPreferences: {
+    emailNotifications: {
+      newEvent: { type: Boolean, default: true },
+      eventPublished: { type: Boolean, default: true },
+      participationApproved: { type: Boolean, default: true },
+      participationRejected: { type: Boolean, default: true },
+      waitlistPromotion: { type: Boolean, default: true },
+      eventCancelled: { type: Boolean, default: true },
+      certificateReady: { type: Boolean, default: true },
+      contributionVerified: { type: Boolean, default: true },
+      eventReminder: { type: Boolean, default: true }
+    },
+    pushNotifications: { type: Boolean, default: true },
+    inAppNotifications: { type: Boolean, default: true }
   }
 }, {
   timestamps: true

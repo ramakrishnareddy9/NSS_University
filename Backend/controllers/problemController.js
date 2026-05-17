@@ -2,6 +2,8 @@ const Problem = require('../models/Problem');
 const User = require('../models/User');
 const Event = require('../models/Event');
 const Notification = require('../models/Notification');
+const UserFollow = require('../models/UserFollow');
+const ProblemUpvote = require('../models/ProblemUpvote');
 const mongoose = require('mongoose');
 const { sendEmail, sendNewEventNotification } = require('../utils/notifications');
 const AuditLog = require('../models/AuditLog');
@@ -574,75 +576,94 @@ exports.resolveProblem = async (req, res) => {
 };
 
 /**
- * @desc    Get leaderboard (top reporters)
+ * @desc    Get leaderboard (top reporters) - ANONYMIZED
  * @route   GET /api/problems/leaderboard
- * @access  Public
+ * @access  Private (Authenticated users only)
  */
 exports.getLeaderboard = async (req, res) => {
   try {
     const { limit = 10, period = 'all' } = req.query;
 
+    // Calculate date filter based on period
     let dateFilter = {};
+    const now = new Date();
+    
     if (period === 'month') {
-      const startOfMonth = new Date();
-      startOfMonth.setDate(1);
-      startOfMonth.setHours(0, 0, 0, 0);
+      // Start of current month
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
       dateFilter = { createdAt: { $gte: startOfMonth } };
     } else if (period === 'year') {
-      const startOfYear = new Date();
-      startOfYear.setMonth(0, 1);
-      startOfYear.setHours(0, 0, 0, 0);
+      // Start of current calendar year
+      const startOfYear = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
       dateFilter = { createdAt: { $gte: startOfYear } };
     }
+    // For 'all', no date filter is applied
 
     // Build aggregation pipeline to count problems per user for the given period
-    const matchStage = {};
-    // Only consider reports that have a reporter
-    matchStage.reportedBy = { $exists: true };
+    const matchStage = { reportedBy: { $exists: true } };
+    
     // Apply date filter when provided
-    if (dateFilter && Object.keys(dateFilter).length > 0) {
+    if (Object.keys(dateFilter).length > 0) {
       matchStage.createdAt = dateFilter.createdAt;
     }
 
     const pipeline = [
       { $match: matchStage },
-      { $group: { _id: '$reportedBy', problemsCount: { $sum: 1 } } },
-      { $lookup: {
+      // Count problems per user in this period
+      { 
+        $group: { 
+          _id: '$reportedBy', 
+          problemsInPeriod: { $sum: 1 },
+          approvedProblems: {
+            $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] }
+          }
+        } 
+      },
+      // Lookup user details
+      { 
+        $lookup: {
           from: 'users',
           localField: '_id',
           foreignField: '_id',
           as: 'user'
-      } },
+        } 
+      },
       { $unwind: '$user' },
+      // Only include students
       { $match: { 'user.role': 'student' } },
-      { $project: {
-          _id: 0,
-          userId: '$_id',
-          problemsCount: 1,
-          name: '$user.name',
-          studentId: '$user.studentId',
-          department: '$user.department',
-          rewardPoints: '$user.rewardPoints',
+      // Project anonymized data only
+      { 
+        $project: {
+          _id: 1,
+          problemsInPeriod: 1,
+          approvedProblems: 1,
           reportingScore: '$user.reportingScore',
           badges: '$user.badges'
-      } },
-      { $sort: { problemsCount: -1, reportingScore: -1, rewardPoints: -1 } },
+        } 
+      },
+      // Sort by problems reported and score
+      { $sort: { problemsInPeriod: -1, reportingScore: -1 } },
       { $limit: parseInt(limit) }
     ];
 
     const topReporters = await Problem.aggregate(pipeline);
 
-    const safeTopReporters = topReporters.map(({ name, department, rewardPoints, badges }) => ({
-      name,
-      department,
-      points: rewardPoints,
-      badges
+    // Add rank and anonymize user IDs
+    const anonymizedLeaderboard = topReporters.map((reporter, index) => ({
+      rank: index + 1,
+      anonymousId: `reporter-${index + 1}`,
+      reportingScore: reporter.reportingScore,
+      problemsReported: reporter.problemsInPeriod,
+      problemsApproved: reporter.approvedProblems,
+      badges: reporter.badges || [],
+      period: period
     }));
 
     res.status(200).json({
       success: true,
-      count: safeTopReporters.length,
-      data: safeTopReporters
+      count: anonymizedLeaderboard.length,
+      period: period,
+      data: anonymizedLeaderboard
     });
   } catch (error) {
     console.error('Error fetching leaderboard:', error);
@@ -781,5 +802,388 @@ async function notifyAllStudentsAboutEvent(event, problem, req) {
     console.error('Error notifying students:', error);
   }
 }
+
+/**
+ * @desc    Get category heatmap (public, anonymized)
+ * @route   GET /api/problems/heatmap/categories
+ * @access  Public
+ */
+exports.getCategoryHeatmap = async (req, res) => {
+  try {
+    const { period = 'month' } = req.query;
+
+    // Calculate date filter
+    let dateFilter = {};
+    const now = new Date();
+    
+    if (period === 'month') {
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      dateFilter = { createdAt: { $gte: startOfMonth } };
+    } else if (period === 'year') {
+      const startOfYear = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
+      dateFilter = { createdAt: { $gte: startOfYear } };
+    } else {
+      // Last 30 days
+      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      dateFilter = { createdAt: { $gte: thirtyDaysAgo } };
+    }
+
+    const matchStage = { reportedBy: { $exists: true } };
+    if (Object.keys(dateFilter).length > 0) {
+      matchStage.createdAt = dateFilter.createdAt;
+    }
+
+    const pipeline = [
+      { $match: matchStage },
+      {
+        $group: {
+          _id: '$category',
+          count: { $sum: 1 },
+          approvedCount: {
+            $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] }
+          },
+          resolvedCount: {
+            $sum: { $cond: [{ $eq: ['$status', 'resolved'] }, 1, 0] }
+          },
+          avgSeverity: {
+            $avg: {
+              $cond: [
+                { $eq: ['$severity', 'critical'] },
+                3,
+                { $cond: [{ $eq: ['$severity', 'high'] }, 2, 1] }
+              ]
+            }
+          }
+        }
+      },
+      { $sort: { count: -1 } }
+    ];
+
+    const heatmapData = await Problem.aggregate(pipeline);
+
+    // Calculate totals
+    const totals = heatmapData.reduce(
+      (acc, cat) => ({
+        totalProblems: acc.totalProblems + cat.count,
+        totalApproved: acc.totalApproved + cat.approvedCount,
+        totalResolved: acc.totalResolved + cat.resolvedCount
+      }),
+      { totalProblems: 0, totalApproved: 0, totalResolved: 0 }
+    );
+
+    const anonymizedHeatmap = heatmapData.map(category => ({
+      category: category._id,
+      problemsReported: category.count,
+      problemsApproved: category.approvedCount,
+      problemsResolved: category.resolvedCount,
+      resolutionRate: category.count > 0 ? ((category.resolvedCount / category.count) * 100).toFixed(1) : 0,
+      approvalRate: category.count > 0 ? ((category.approvedCount / category.count) * 100).toFixed(1) : 0,
+      averageSeverity: category.avgSeverity.toFixed(1),
+      percentageOfTotal: ((category.count / totals.totalProblems) * 100).toFixed(1)
+    }));
+
+    res.status(200).json({
+      success: true,
+      period: period,
+      totals,
+      data: anonymizedHeatmap
+    });
+  } catch (error) {
+    console.error('Error fetching category heatmap:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch category heatmap',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Follow a user (with duplicate prevention)
+ * @route   POST /api/problems/follow/:userId
+ * @access  Private
+ */
+exports.followUser = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const followerId = req.user._id;
+
+    // Prevent self-follow
+    if (followerId.toString() === userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'You cannot follow yourself'
+      });
+    }
+
+    // Verify target user exists
+    const targetUser = await User.findById(userId);
+    if (!targetUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Check if already following (duplicate prevention via unique index)
+    let follow = await UserFollow.findOne({
+      follower: followerId,
+      following: userId
+    });
+
+    if (follow) {
+      return res.status(400).json({
+        success: false,
+        message: 'Already following this user'
+      });
+    }
+
+    // Create follow relationship
+    follow = await UserFollow.create({
+      follower: followerId,
+      following: userId
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Successfully followed user',
+      data: follow
+    });
+  } catch (error) {
+    console.error('Error following user:', error);
+    
+    // Handle duplicate key error
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Already following this user'
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Failed to follow user',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Unfollow a user
+ * @route   DELETE /api/problems/follow/:userId
+ * @access  Private
+ */
+exports.unfollowUser = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const followerId = req.user._id;
+
+    const result = await UserFollow.findOneAndDelete({
+      follower: followerId,
+      following: userId
+    });
+
+    if (!result) {
+      return res.status(404).json({
+        success: false,
+        message: 'Follow relationship not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Successfully unfollowed user'
+    });
+  } catch (error) {
+    console.error('Error unfollowing user:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to unfollow user',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Get followers count for a user
+ * @route   GET /api/problems/followers/:userId
+ * @access  Public
+ */
+exports.getFollowersCount = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const followersCount = await UserFollow.countDocuments({
+      following: userId
+    });
+
+    const followingCount = await UserFollow.countDocuments({
+      follower: userId
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        userId,
+        followers: followersCount,
+        following: followingCount
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching followers count:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch followers count',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Upvote a problem (with duplicate prevention)
+ * @route   POST /api/problems/:id/upvote
+ * @access  Private
+ */
+exports.upvoteProblem = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user._id;
+
+    // Verify problem exists
+    const problem = await Problem.findById(id);
+    if (!problem) {
+      return res.status(404).json({
+        success: false,
+        message: 'Problem not found'
+      });
+    }
+
+    // Check if already upvoted (duplicate prevention via unique index)
+    let upvote = await ProblemUpvote.findOne({
+      problem: id,
+      upvotedBy: userId
+    });
+
+    if (upvote) {
+      return res.status(400).json({
+        success: false,
+        message: 'Already upvoted this problem'
+      });
+    }
+
+    // Create upvote
+    upvote = await ProblemUpvote.create({
+      problem: id,
+      upvotedBy: userId
+    });
+
+    // Increment upvote count on problem
+    problem.upvotes = (problem.upvotes || 0) + 1;
+    await problem.save();
+
+    res.status(201).json({
+      success: true,
+      message: 'Successfully upvoted problem',
+      data: {
+        problemId: id,
+        upvotes: problem.upvotes
+      }
+    });
+  } catch (error) {
+    console.error('Error upvoting problem:', error);
+    
+    // Handle duplicate key error
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Already upvoted this problem'
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Failed to upvote problem',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Remove upvote from a problem
+ * @route   DELETE /api/problems/:id/upvote
+ * @access  Private
+ */
+exports.removeUpvote = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user._id;
+
+    // Remove upvote
+    const result = await ProblemUpvote.findOneAndDelete({
+      problem: id,
+      upvotedBy: userId
+    });
+
+    if (!result) {
+      return res.status(404).json({
+        success: false,
+        message: 'Upvote not found'
+      });
+    }
+
+    // Decrement upvote count on problem
+    const problem = await Problem.findById(id);
+    if (problem) {
+      problem.upvotes = Math.max(0, (problem.upvotes || 1) - 1);
+      await problem.save();
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Successfully removed upvote',
+      data: {
+        problemId: id,
+        upvotes: problem?.upvotes || 0
+      }
+    });
+  } catch (error) {
+    console.error('Error removing upvote:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to remove upvote',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Get upvote count for a problem
+ * @route   GET /api/problems/:id/upvotes
+ * @access  Public
+ */
+exports.getUpvoteCount = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const upvoteCount = await ProblemUpvote.countDocuments({
+      problem: id
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        problemId: id,
+        upvotes: upvoteCount
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching upvote count:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch upvote count',
+      error: error.message
+    });
+  }
+};
 
 module.exports = exports;

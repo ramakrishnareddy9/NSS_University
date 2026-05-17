@@ -199,6 +199,12 @@ const AdminDashboard = () => {
             >
               Manage Academic Years
             </a>
+            <a
+              href="/admin/event-capacity-analytics"
+              className="block w-full text-left px-4 py-2 bg-emerald-50 hover:bg-emerald-100 rounded-md text-emerald-700 font-medium"
+            >
+              View Event Capacity Analytics
+            </a>
           </div>
         </div>
       </div>

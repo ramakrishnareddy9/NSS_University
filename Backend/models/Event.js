@@ -98,6 +98,18 @@ const eventSchema = new mongoose.Schema({
   relatedProblemId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Problem'
+  },
+  // Event cancellation audit fields
+  cancelledAt: {
+    type: Date
+  },
+  cancelledBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  cancellationReason: {
+    type: String,
+    trim: true
   }
 }, {
   timestamps: true
@@ -106,6 +118,7 @@ const eventSchema = new mongoose.Schema({
 eventSchema.index({ status: 1, startDate: 1 });
 eventSchema.index({ startDate: 1, endDate: 1 });
 eventSchema.index({ academicYear: 1, startDate: 1 });
+eventSchema.index({ maxParticipants: 1, currentParticipants: 1 });
 
 module.exports = mongoose.model('Event', eventSchema);
 

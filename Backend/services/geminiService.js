@@ -164,8 +164,72 @@ Date: ${r.event?.startDate ? new Date(r.event.startDate).toLocaleDateString() : 
     
     const totalStudents = new Set(reports.map(r => r.student?._id?.toString())).size;
     const totalEvents = new Set(reports.map(r => r.event?._id?.toString())).size;
+    const eventTypeBreakdown = getEventsBreakdown(reports);
     
-    const prompt = `
+    const prompt = reportType === 'NAAC' ? `
+Generate a comprehensive NAAC Criterion 5.3 compliant report for NSS activities for Academic Year ${academicYear}.
+
+CRITICAL DETAILS:
+- Total Events: ${totalEvents}
+- Event Type Breakdown: ${Object.entries(eventTypeBreakdown).map(([type, count]) => `${type}: ${count}`).join(', ')}
+- Total Student Reports: ${reports.length}
+- Total Students Participated: ${totalStudents}
+
+Individual Reports Summary:
+${reportsSummary}
+
+Generate a detailed report addressing NAAC Criterion 5.3 (Student Support and Progression) with structured sections:
+
+1. EXECUTIVE SUMMARY
+   - Overview of NSS's role in student support and progression
+   - Key statistics and achievements
+
+2. YOUTH DEVELOPMENT PROGRAMS
+   - Specific programs conducted during the academic year
+   - Learning objectives and outcomes
+   - Skills developed through participation
+   - Number of students benefited
+   - Total volunteer hours contributed
+
+3. CAREER AND PERSONALITY DEVELOPMENT
+   - Career guidance and counseling initiatives
+   - Entrepreneurship development programs
+   - Placement assistance provided
+   - Professional skills training conducted
+
+4. COMMUNITY PARTNERSHIP AND SOCIAL RESPONSIBILITY
+   - Community partnerships established
+   - Social projects and their impact
+   - Community feedback and testimonials
+   - Sustainability of initiatives
+
+5. STUDENT PARTICIPATION METRICS
+   - Total students engaged
+   - Diversity of participation (departments, years, backgrounds)
+   - Learning outcomes achieved
+   - Participation trends
+
+6. KEY ACHIEVEMENTS AND MEASURABLE OUTCOMES
+   - Quantifiable results
+   - Student testimonials and case studies
+   - Awards and recognition
+
+7. CHALLENGES AND LEARNINGS
+   - Obstacles faced
+   - Lessons learned
+   - Areas of improvement
+
+8. RECOMMENDATIONS FOR FUTURE
+   - Suggestions for program enhancement
+   - Scaling potential
+   - Resource requirements
+
+9. CONCLUSION
+
+IMPORTANT: Use specific data from the reports provided. Include exact numbers, dates, and student names where relevant. 
+Focus on demonstrating how NSS activities directly support student development, career readiness, and personality growth as per NAAC Criterion 5.3.
+Format with clear sections, bullet points, and professional language suitable for accreditation submission.
+` : `
 Generate a comprehensive ${reportType} report for NSS activities for Academic Year ${academicYear}.
 
 Statistics:
@@ -203,6 +267,7 @@ Include specific data points, statistics, and measurable outcomes.
       totalStudents,
       generatedAt: new Date(),
       content: consolidatedReport,
+      draftStatus: 'pending',
       statistics: {
         eventsBreakdown: getEventsBreakdown(reports),
         participationTrends: getParticipationTrends(reports),
@@ -263,12 +328,12 @@ Keep the summary professional and concise (300-500 words).
 }
 
 /**
- * Get breakdown of events by category
+ * Get breakdown of events by type (corrected field reference to eventType only)
  */
 function getEventsBreakdown(reports) {
   const breakdown = {};
   reports.forEach(r => {
-    const category = r.event?.eventType || r.event?.category || 'Other';
+    const category = r.event?.eventType || 'Other';
     breakdown[category] = (breakdown[category] || 0) + 1;
   });
   return breakdown;

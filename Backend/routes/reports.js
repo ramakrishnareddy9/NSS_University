@@ -1155,5 +1155,194 @@ router.put('/admin/review/:reportId', [auth, authorize('admin', 'faculty')], asy
   }
 });
 
+// @route   POST /api/reports/admin/generate-naac-preview
+// @desc    Generate NAAC report preview without saving (for admin review before finalization)
+// @access  Private (Admin)
+router.post('/admin/generate-naac-preview', [auth, authorize('admin')], async (req, res) => {
+  try {
+    const { academicYear } = req.body;
+
+    if (!academicYear) {
+      return res.status(400).json({ message: 'Academic year is required' });
+    }
+
+    const resolvedAcademicYear = (await resolveAcademicYearContext(academicYear)).label;
+
+    // Fetch all approved reports for the academic year
+    const reports = await Report.find({
+      academicYear: resolvedAcademicYear,
+      status: { $in: ['submitted', 'reviewed', 'approved'] }
+    })
+      .populate('student', 'name email studentId department')
+      .populate('event', 'title startDate endDate location eventType');
+
+    if (reports.length === 0) {
+      return res.status(404).json({ message: 'No reports found for this academic year' });
+    }
+
+    console.log(`📊 Generating NAAC preview for ${resolvedAcademicYear} with ${reports.length} reports...`);
+
+    const naacPreview = await generateConsolidatedReport(reports, resolvedAcademicYear, 'NAAC');
+
+    res.json({
+      message: 'NAAC preview generated successfully',
+      preview: naacPreview,
+      status: 'pending_approval'
+    });
+  } catch (error) {
+    console.error('Generate NAAC preview error:', error.cause || error);
+    const status = error.statusCode || 500;
+    res.status(status).json({
+      message: error.clientMessage || error.message || 'Failed to generate NAAC preview',
+      details: process.env.NODE_ENV !== 'production' ? error.details : undefined
+    });
+  }
+});
+
+// @route   PUT /api/reports/admin/save-naac-draft
+// @desc    Save edited NAAC report draft (admin can edit AI-generated content)
+// @access  Private (Admin)
+router.put('/admin/save-naac-draft', [auth, authorize('admin')], async (req, res) => {
+  try {
+    const { academicYear, editedContent, criterion53Data } = req.body;
+
+    if (!academicYear || !editedContent) {
+      return res.status(400).json({ message: 'Academic year and edited content are required' });
+    }
+
+    const resolvedAcademicYear = (await resolveAcademicYearContext(academicYear)).label;
+
+    // Find all reports for the academic year and update their draft content
+    const reports = await Report.updateMany(
+      {
+        academicYear: resolvedAcademicYear,
+        status: { $in: ['submitted', 'reviewed', 'approved'] }
+      },
+      {
+        $set: {
+          'aiDraftContent.editedContent': editedContent,
+          'aiDraftContent.editedAt': new Date(),
+          'aiDraftContent.editedBy': req.user.id,
+          'aiDraftContent.status': 'edited',
+          ...(criterion53Data && { 'naacCriterion53': criterion53Data })
+        }
+      },
+      { multi: true }
+    );
+
+    console.log(`✏️ Saved NAAC draft edits for ${resolvedAcademicYear}. Updated ${reports.modifiedCount} reports.`);
+
+    res.json({
+      message: 'NAAC draft saved successfully',
+      reportsUpdated: reports.modifiedCount,
+      academicYear: resolvedAcademicYear,
+      status: 'edited'
+    });
+  } catch (error) {
+    console.error('Save NAAC draft error:', error);
+    const status = error.statusCode || 500;
+    res.status(status).json({
+      message: error.clientMessage || error.message || 'Failed to save NAAC draft',
+      details: process.env.NODE_ENV !== 'production' ? error.details : undefined
+    });
+  }
+});
+
+// @route   POST /api/reports/admin/generate-naac-pdf
+// @desc    Generate final NAAC PDF report (from edited or AI-generated content)
+// @access  Private (Admin)
+router.post('/admin/generate-naac-pdf', [auth, authorize('admin')], async (req, res) => {
+  try {
+    const { academicYear, useEditedContent = false } = req.body;
+
+    if (!academicYear) {
+      return res.status(400).json({ message: 'Academic year is required' });
+    }
+
+    const resolvedAcademicYear = (await resolveAcademicYearContext(academicYear)).label;
+
+    // Fetch all approved reports
+    const reports = await Report.find({
+      academicYear: resolvedAcademicYear,
+      status: { $in: ['submitted', 'reviewed', 'approved'] }
+    })
+      .populate('student', 'name email studentId department')
+      .populate('event', 'title startDate endDate location eventType');
+
+    if (reports.length === 0) {
+      return res.status(404).json({ message: 'No reports found for this academic year' });
+    }
+
+    // Get the content (edited or AI-generated)
+    let reportContent = '';
+    if (useEditedContent && reports[0].aiDraftContent?.editedContent) {
+      reportContent = reports[0].aiDraftContent.editedContent;
+    } else {
+      const naacReport = await generateConsolidatedReport(reports, resolvedAcademicYear, 'NAAC');
+      reportContent = naacReport.content;
+    }
+
+    // Generate PDF with jsPDF
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+
+    doc.setFontSize(16);
+    doc.text('NSS NAAC Report', 20, 20);
+    doc.setFontSize(12);
+    doc.text(`Academic Year: ${resolvedAcademicYear}`, 20, 30);
+    doc.text(`Generated: ${new Date().toLocaleDateString()}`, 20, 40);
+
+    // Add content with word wrapping
+    let cursorY = 50;
+    doc.setFontSize(11);
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const maxWidth = pageWidth - 40;
+
+    const lines = doc.splitTextToSize(reportContent, maxWidth);
+    lines.forEach((line) => {
+      if (cursorY > pageHeight - 20) {
+        doc.addPage();
+        cursorY = 20;
+      }
+      doc.text(line, 20, cursorY);
+      cursorY += 6;
+    });
+
+    const pdfBuffer = Buffer.from(doc.output('arraybuffer'));
+    const base64 = pdfBuffer.toString('base64');
+
+    // Upload to Cloudinary
+    const uploadResult = await cloudinary.uploader.upload(
+      `data:application/pdf;base64,${base64}`,
+      {
+        folder: 'nss-naac-reports',
+        resource_type: 'raw',
+        public_id: `naac-report-${resolvedAcademicYear}-${Date.now()}`
+      }
+    );
+
+    console.log(`✅ NAAC PDF generated and uploaded: ${uploadResult.secure_url}`);
+
+    res.json({
+      message: 'NAAC PDF generated successfully',
+      pdfUrl: uploadResult.secure_url,
+      publicId: uploadResult.public_id,
+      academicYear: resolvedAcademicYear,
+      downloadUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/admin/reports?download=${uploadResult.public_id}`
+    });
+  } catch (error) {
+    console.error('Generate NAAC PDF error:', error);
+    const status = error.statusCode || 500;
+    res.status(status).json({
+      message: error.clientMessage || error.message || 'Failed to generate NAAC PDF',
+      details: process.env.NODE_ENV !== 'production' ? error.details : undefined
+    });
+  }
+});
+
 module.exports = router;
 

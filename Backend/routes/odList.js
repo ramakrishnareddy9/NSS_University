@@ -14,6 +14,8 @@ const { auth, authorize } = require('../middleware/auth');
 
 const XLSX = require('xlsx');
 
+const { generateODLetterPDF, generateBatchODLetterPDFs } = require('../utils/odLetterPDF');
+
 
 
 // Get OD list for an event
@@ -410,7 +412,102 @@ function parseTime(timeString) {
 
 }
 
+// Generate and download department-wise OD letter PDF (faculty-countersigned)
+router.get('/event/:eventId/letter-pdf/:department', [auth, authorize('admin', 'faculty')], async (req, res) => {
+  try {
+    const { eventId, department } = req.params;
+    
+    const event = await Event.findById(eventId)
+      .populate({
+        path: 'participations',
+        populate: {
+          path: 'student',
+          select: 'name studentId year department email'
+        }
+      });
 
+    if (!event) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+
+    // Filter approved participants for this department
+    const approvedParticipants = event.participations
+      .filter(p => (p.status === 'approved' || p.status === 'attended') && p.student.department === department)
+      .map(p => ({
+        registrationNumber: p.student.studentId,
+        name: p.student.name,
+        year: p.student.year,
+        department: p.student.department,
+        email: p.student.email,
+        status: p.status,
+        attendance: p.attendance
+      }));
+
+    if (approvedParticipants.length === 0) {
+      return res.status(404).json({ message: 'No participants found for this department' });
+    }
+
+    // Generate PDF
+    const pdfBuffer = await generateODLetterPDF({
+      event,
+      participants: approvedParticipants,
+      department
+    });
+
+    // Set response headers
+    const fileName = `OD_Letter_${department}_${event.title.replace(/[^a-zA-Z0-9]/g, '_')}_${new Date(event.startDate).toLocaleDateString().replace(/\//g, '-')}.pdf`;
+    
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error('Error generating OD letter PDF:', error);
+    res.status(500).json({ message: 'Failed to generate OD letter PDF', error: error.message });
+  }
+});
+
+// Get list of departments with participant counts for an event
+router.get('/event/:eventId/departments', [auth, authorize('admin', 'faculty')], async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    
+    const event = await Event.findById(eventId)
+      .populate({
+        path: 'participations',
+        populate: {
+          path: 'student',
+          select: 'department'
+        }
+      });
+
+    if (!event) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+
+    // Group by department
+    const departmentStats = {};
+    event.participations
+      .filter(p => (p.status === 'approved' || p.status === 'attended'))
+      .forEach(p => {
+        const dept = p.student.department || 'Unknown';
+        departmentStats[dept] = (departmentStats[dept] || 0) + 1;
+      });
+
+    res.json({
+      event: { id: event._id, title: event.title },
+      departments: Object.entries(departmentStats).map(([name, count]) => ({
+        name,
+        participants: count,
+        letterUrl: `/api/od-list/event/${eventId}/letter-pdf/${name}`
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching departments:', error);
+    res.status(500).json({ message: 'Failed to fetch departments' });
+  }
+});
 
 module.exports = router;
 

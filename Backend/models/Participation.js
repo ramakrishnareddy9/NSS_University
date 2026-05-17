@@ -62,6 +62,17 @@ const participationSchema = new mongoose.Schema({
     url: String,
     publicId: String,
     generatedAt: Date
+  },
+  waitlistStatus: {
+    type: String,
+    enum: ['none', 'waitlisted', 'promoted_from_waitlist'],
+    default: 'none'
+  },
+  waitlistedAt: {
+    type: Date
+  },
+  promotedAt: {
+    type: Date
   }
 }, {
   timestamps: true
@@ -69,6 +80,8 @@ const participationSchema = new mongoose.Schema({
 
 // Prevent duplicate participations
 participationSchema.index({ student: 1, event: 1 }, { unique: true });
+// Index for efficient waitlist queries
+participationSchema.index({ event: 1, waitlistStatus: 1, waitlistedAt: 1 });
 
 module.exports = mongoose.model('Participation', participationSchema);
 
