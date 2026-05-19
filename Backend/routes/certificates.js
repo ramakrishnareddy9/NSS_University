@@ -73,7 +73,7 @@ router.post('/force-save-test/:eventId', [
     });
   } catch (error) {
     console.error('Force save test error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    return next(error);
   }
 });
 
@@ -108,7 +108,7 @@ router.get('/debug/:eventId', [
     res.json(debug);
   } catch (error) {
     console.error('Debug error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    return next(error);
   }
 });
 
@@ -236,7 +236,7 @@ router.post('/upload-template/:eventId', [
     });
   } catch (error) {
     console.error('Upload template error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    return next(error);
   }
 });
 
@@ -303,7 +303,7 @@ router.put('/configure/:eventId', [
     });
   } catch (error) {
     console.error('Configure certificate error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    return next(error);
   }
 });
 
@@ -328,7 +328,7 @@ router.get('/config/:eventId', [
     });
   } catch (error) {
     console.error('Get certificate config error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    return next(error);
   }
 });
 
@@ -391,16 +391,7 @@ router.post('/generate/:eventId', [
   } catch (error) {
     console.error('Generate certificates error:', error);
     console.error('Error stack:', error.stack);
-    const errorResponse = { 
-      message: error.message || 'Server error',
-      error: error.message
-    };
-
-    if (process.env.NODE_ENV !== 'production') {
-      errorResponse.stack = error.stack;
-    }
-
-    res.status(500).json(errorResponse);
+    return next(error);
   }
 });
 
@@ -514,13 +505,7 @@ router.post('/test-preview/:eventId', [
   } catch (error) {
     console.error('Test preview error:', error);
     console.error('Error stack:', error.stack);
-    const errorResponse = { message: 'Server error', error: error.message };
-
-    if (process.env.NODE_ENV !== 'production') {
-      errorResponse.stack = error.stack;
-    }
-
-    res.status(500).json(errorResponse);
+    return next(error);
   }
 });
 
@@ -562,13 +547,7 @@ router.get('/my-certificates', auth, async (req, res) => {
   } catch (error) {
     console.error('❌ Error fetching certificates:', error);
     console.error('   Stack:', error.stack);
-    const errorResponse = { message: 'Server error', error: error.message };
-
-    if (process.env.NODE_ENV !== 'production') {
-      errorResponse.stack = error.stack;
-    }
-
-    res.status(500).json(errorResponse);
+    return next(error);
   }
 });
 

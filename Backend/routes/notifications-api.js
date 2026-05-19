@@ -6,7 +6,7 @@ const redis = require('../config/redis');
 
 const router = express.Router();
 
-// @route   GET /api/notifications-api
+// @route   GET /api/notifications
 // @desc    Get user's notifications with filtering
 // @access  Private
 router.get('/', auth, async (req, res) => {
@@ -37,11 +37,12 @@ router.get('/', auth, async (req, res) => {
     });
 
     res.json({
+      success: true,
+      data: notifications,
       total,
       page: parseInt(page),
       limit: parseInt(limit),
       pages: Math.ceil(total / limit),
-      notifications,
       unreadCount
     });
   } catch (error) {
@@ -50,7 +51,7 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
-// @route   GET /api/notifications-api/counts
+// @route   GET /api/notifications/counts
 // @desc    Get unread notification counts by type
 // @access  Private
 router.get('/counts', auth, async (req, res) => {
@@ -82,17 +83,14 @@ router.get('/counts', auth, async (req, res) => {
       countMap[c._id] = c.count;
     });
     
-    res.json({
-      total,
-      byType: countMap
-    });
+    res.json({ success: true, data: { total, byType: countMap } });
   } catch (error) {
     console.error('Get notification counts error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// @route   PUT /api/notifications-api/:id/read
+// @route   PUT /api/notifications/:id/read
 // @desc    Mark notification as read
 // @access  Private
 router.put('/:id/read', auth, async (req, res) => {
@@ -104,7 +102,7 @@ router.put('/:id/read', auth, async (req, res) => {
     });
 
     if (!notification) {
-      return res.status(404).json({ message: 'Notification not found' });
+      return res.status(404).json({ success: false, message: 'Notification not found' });
     }
 
     notification.read = true;
@@ -117,14 +115,14 @@ router.put('/:id/read', auth, async (req, res) => {
       console.warn('Cache invalidation failed after marking notification read:', cacheErr.message);
     }
 
-    res.json(notification);
+    res.json({ success: true, data: notification });
   } catch (error) {
     console.error('Mark notification read error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// @route   PUT /api/notifications-api/read-all
+// @route   PUT /api/notifications/read-all
 // @desc    Mark all notifications as read
 // @access  Private
 router.put('/read-all', auth, async (req, res) => {
@@ -141,16 +139,19 @@ router.put('/read-all', auth, async (req, res) => {
     }
 
     res.json({ 
-      message: 'All notifications marked as read',
-      modifiedCount: result.modifiedCount
+      success: true,
+      data: {
+        message: 'All notifications marked as read',
+        modifiedCount: result.modifiedCount
+      }
     });
   } catch (error) {
     console.error('Mark all read error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// @route   DELETE /api/notifications-api/:id
+// @route   DELETE /api/notifications/:id
 // @desc    Delete notification
 // @access  Private
 router.delete('/:id', auth, async (req, res) => {
@@ -162,7 +163,7 @@ router.delete('/:id', auth, async (req, res) => {
     });
 
     if (!notification) {
-      return res.status(404).json({ message: 'Notification not found' });
+      return res.status(404).json({ success: false, message: 'Notification not found' });
     }
 
     try {
@@ -171,14 +172,14 @@ router.delete('/:id', auth, async (req, res) => {
       console.warn('Cache invalidation failed after notification delete:', cacheErr.message);
     }
 
-    res.json({ message: 'Notification deleted' });
+    res.json({ success: true, message: 'Notification deleted' });
   } catch (error) {
     console.error('Delete notification error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// @route   GET /api/notifications-api/preferences
+// @route   GET /api/notifications/preferences
 // @desc    Get user notification preferences
 // @access  Private
 router.get('/preferences', auth, async (req, res) => {
@@ -196,7 +197,7 @@ router.get('/preferences', auth, async (req, res) => {
   }
 });
 
-// @route   PUT /api/notifications-api/preferences
+// @route   PUT /api/notifications/preferences
 // @desc    Update user notification preferences
 // @access  Private
 router.put('/preferences', auth, async (req, res) => {

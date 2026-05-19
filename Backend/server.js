@@ -11,7 +11,7 @@ const rateLimit = require('express-rate-limit');
 // Load environment variables
 dotenv.config({ path: path.join(__dirname, '.env') });
 
-const validateRequiredEnvironmentVariables = () => {
+const validateEnv = () => {
   const requiredVariables = ['JWT_SECRET'];
   const missingVariables = requiredVariables.filter((variable) => {
     const value = process.env[variable];
@@ -23,7 +23,8 @@ const validateRequiredEnvironmentVariables = () => {
   }
 };
 
-validateRequiredEnvironmentVariables();
+// Fail fast if required environment variables are missing.
+validateEnv();
 
 // Log environment status (without sensitive data)
 console.log('\n🔧 Environment Configuration:');
@@ -65,6 +66,8 @@ const io = require('socket.io')(server, {
 app.set('io', io);
 
 // Middleware
+// Explicit CORS allowlist for the Express REST API (prevents wildcard origin acceptance)
+console.log('CORS allowed origins:', allowedCorsOrigins.length ? allowedCorsOrigins.join(', ') : 'NONE');
 app.use(cors({
   origin: allowedCorsOrigins,
   credentials: true
@@ -172,7 +175,7 @@ app.use('/api/contributions', require('./routes/contributions'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/users', require('./routes/users'));
 app.use('/api/upload', require('./routes/upload'));
-app.use('/api/scheduler', require('./routes/notifications-scheduler'));
+app.use('/api/notification-scheduler', require('./routes/notifications-scheduler'));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -183,7 +186,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.use('/api/notifications-api', require('./routes/notifications-api'));
+app.use('/api/notifications', require('./routes/notifications-api'));
 app.use('/api/certificates', require('./routes/certificates'));
 app.use('/api/ai-assistant', require('./routes/aiAssistant'));
 app.use('/api/stats', require('./routes/stats'));
@@ -255,10 +258,46 @@ console.log('✅ Notification cleanup scheduler initialized (runs every hour)');
 
 const PORT = process.env.PORT || 5000;
 
+// Expose Prometheus metrics if prom-client is installed
+let promClientAvailable = false;
+try {
+  const promClient = require('prom-client');
+  promClient.collectDefaultMetrics();
+  promClientAvailable = true;
+  app.get('/metrics', async (req, res) => {
+    try {
+      res.setHeader('Content-Type', promClient.register.contentType);
+      res.send(await promClient.register.metrics());
+    } catch (err) {
+      res.status(500).send('Failed to collect metrics');
+    }
+  });
+  console.log('Prometheus metrics endpoint enabled at /metrics');
+} catch (e) {
+  // prom-client not installed or failed to load; metrics endpoint disabled
+}
+
 // Timeout tuning helps reduce Slowloris-style resource exhaustion.
 server.headersTimeout = Number(process.env.HEADERS_TIMEOUT_MS || 65000);
 server.requestTimeout = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
 server.keepAliveTimeout = Number(process.env.KEEP_ALIVE_TIMEOUT_MS || 5000);
+
+// Global error handler — ensure stack traces are never leaked to clients in production.
+app.use((err, req, res, next) => {
+  try {
+    console.error('Unhandled error:', err && (err.stack || err));
+  } catch (logErr) {
+    console.error('Error while logging error:', logErr);
+  }
+
+  const status = (err && err.status) || 500;
+  const payload = { message: (err && err.message) || 'Server error' };
+  if (process.env.NODE_ENV !== 'production' && err && err.stack) {
+    payload.stack = err.stack;
+  }
+
+  res.status(status).json(payload);
+});
 
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

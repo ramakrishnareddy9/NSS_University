@@ -3,6 +3,7 @@ const User = require('../models/User');
 const Participation = require('../models/Participation');
 const Contribution = require('../models/Contribution');
 const Event = require('../models/Event');
+const AcademicYearConfig = require('../models/AcademicYearConfig');
 const { auth, authorize } = require('../middleware/auth');
 const escapeRegex = require('../utils/escapeRegex');
 const validateObjectId = require('../middleware/validateObjectId');
@@ -17,13 +18,16 @@ router.get('/', [auth, authorize('admin', 'faculty')], async (req, res) => {
   try {
     const { role, search } = req.query;
     const query = {};
+    const MAX_SEARCH_LENGTH = 200; // guard against ReDoS by limiting user-controlled regex input
 
     if (role) {
       query.role = role;
     }
 
     if (search) {
-      const safeSearch = escapeRegex(search.trim());
+      const trimmed = String(search).trim();
+      const capped = trimmed.length > MAX_SEARCH_LENGTH ? trimmed.slice(0, MAX_SEARCH_LENGTH) : trimmed;
+      const safeSearch = escapeRegex(capped);
       query.$or = [
         { name: { $regex: safeSearch, $options: 'i' } },
         { email: { $regex: safeSearch, $options: 'i' } },
@@ -45,7 +49,7 @@ router.get('/', [auth, authorize('admin', 'faculty')], async (req, res) => {
     res.json(buildPagedResponse(users, total, page, limit));
   } catch (error) {
     console.error('Get users error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -82,14 +86,12 @@ router.get('/stats', [auth, authorize('admin', 'faculty')], async (req, res) => 
     };
 
     console.log('📊 Dashboard stats:', stats);
-    res.json(stats);
+    res.json({ success: true, data: stats });
   } catch (error) {
     console.error('Get stats error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
-const appConfig = require('../config/appConfig');
 
 // @route   GET /api/users/student/:id
 // @desc    Get student profile with details
@@ -106,7 +108,7 @@ router.get('/student/:id', auth, validateObjectId('id'), async (req, res) => {
       .populate('contributions');
 
     if (!student || student.role !== 'student') {
-      return res.status(404).json({ message: 'Student not found' });
+      return res.status(404).json({ success: false, message: 'Student not found' });
     }
 
     const participations = await Participation.find({ student: student._id, isDeleted: { $ne: true } })
@@ -116,13 +118,24 @@ router.get('/student/:id', auth, validateObjectId('id'), async (req, res) => {
       .populate('event', 'title eventType')
       .populate('participation');
 
+    // Resolve certificate eligibility threshold from DB config for student's academic year.
+    // Fallback order: matching active year config -> latest active config -> 240.
+    const matchedConfig = student.academicYear
+      ? await AcademicYearConfig.findOne({ yearLabel: student.academicYear, isActive: true })
+      : null;
+    const activeConfig = matchedConfig || await AcademicYearConfig.findOne({ isActive: true }).sort({ createdAt: -1 });
+    const certificateHoursRequired = Number.isFinite(Number(activeConfig?.certificateHoursRequired))
+      ? Number(activeConfig.certificateHoursRequired)
+      : 240;
+
     res.json({
       student,
       participations,
       contributions,
       totalEvents: participations.length,
       totalHours: student.totalVolunteerHours,
-      certificateEligible: student.totalVolunteerHours >= (appConfig.CERTIFICATE_HOURS_REQUIRED || 120)
+      certificateHoursRequired,
+      certificateEligible: student.totalVolunteerHours >= certificateHoursRequired
     });
   } catch (error) {
     console.error('Get student profile error:', error);

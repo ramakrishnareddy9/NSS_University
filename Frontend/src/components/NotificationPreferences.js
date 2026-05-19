@@ -30,7 +30,7 @@ const NotificationPreferences = () => {
   const fetchPreferences = async () => {
     try {
       setLoading(true);
-      const response = await api.get('/notifications-api/preferences');
+      const response = await api.get('/notifications/preferences');
       setPreferences(response.data);
     } catch (error) {
       console.error('Failed to fetch preferences:', error);
@@ -60,7 +60,7 @@ const NotificationPreferences = () => {
   const savePreferences = async () => {
     try {
       setSaving(true);
-      await api.put('/notifications-api/preferences', preferences);
+      await api.put('/notifications/preferences', preferences);
       toast.success('Preferences saved successfully');
     } catch (error) {
       console.error('Failed to save preferences:', error);

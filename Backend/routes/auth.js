@@ -8,9 +8,15 @@ const EmailVerificationOTP = require('../models/EmailVerificationOTP');
 const { auth } = require('../middleware/auth');
 const { sendPasswordResetOTP, sendEmail, generateOTP } = require('../utils/notifications');
 const { isInstitutionalEmail } = require('../utils/emailPolicy');
+const { resolveAcademicYearContext } = require('../utils/academicYear');
 
 const router = express.Router();
 const jwtSecret = process.env.JWT_SECRET;
+
+if (!jwtSecret || !jwtSecret.trim()) {
+  console.error('FATAL: JWT_SECRET environment variable is not set. Aborting startup.');
+  throw new Error('JWT_SECRET environment variable is required');
+}
 
 // Generate JWT Token
 const generateToken = (id) => {
@@ -26,7 +32,6 @@ router.post('/register', [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Please provide a valid email'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('role').equals('student').withMessage('Public registration is limited to students'),
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -34,7 +39,13 @@ router.post('/register', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { name, email, password, role, studentId, phone, department, year, academicYear, batch } = req.body;
+    const { name, email, password, studentId, phone, department, year, academicYear, batch } = req.body;
+    // Force public registrations to be students only. Reject attempts to register as elevated roles.
+    if (req.body.role && (req.body.role === 'admin' || req.body.role === 'faculty')) {
+      console.warn(`Blocked public registration attempt with elevated role: ${req.body.role} for email ${email}`);
+      return res.status(403).json({ success: false, message: 'Cannot register with elevated role. Use invite flow for admin/faculty accounts.' });
+    }
+    const role = 'student';
     const normalizedEmail = email.toLowerCase();
 
     if (!isInstitutionalEmail(normalizedEmail)) {
@@ -58,19 +69,15 @@ router.post('/register', [
       }
     }
 
-    // Auto-derive academic year like "2024-25" based on current date if not provided
-    const deriveAcademicYear = () => {
-      const now = new Date();
-      const yearNum = now.getFullYear();
-      const month = now.getMonth() + 1; // 1-12
-      // If month >= June, academic year is currentYear-currentYear+1, else previousYear-currentYear
-      const startYear = month >= 6 ? yearNum : yearNum - 1;
-      const endYearShort = (startYear + 1).toString().slice(-2);
-      return `${startYear}-${endYearShort}`;
-    };
+    let resolvedAcademicYear;
+    let resolvedBatch;
 
-    const resolvedAcademicYear = academicYear || (role === 'student' ? deriveAcademicYear() : undefined);
-    const resolvedBatch = batch || resolvedAcademicYear;
+    if (role === 'student') {
+      // Derive academic year from active AcademicYearConfig (falls back to default context when no active config exists).
+      const academicYearContext = await resolveAcademicYearContext(academicYear);
+      resolvedAcademicYear = academicYearContext?.label;
+      resolvedBatch = batch || resolvedAcademicYear;
+    }
 
     // Create user
     const user = new User({
@@ -355,21 +362,36 @@ router.post('/verify-otp', [
       return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
     }
 
-    // Find user
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
+    // Use transaction to atomically update user password and mark OTP as used
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        // Find user within transaction
+        const user = await User.findOne({ email }).session(session);
+        if (!user) {
+          const err = new Error('User not found');
+          err.statusCode = 404;
+          throw err;
+        }
+
+        // Update password
+        user.password = newPassword;
+        await user.save({ session });
+
+        // Mark OTP as used
+        otpRecord.isUsed = true;
+        await otpRecord.save({ session });
+      });
+    } catch (txnError) {
+      if (txnError.statusCode === 404) {
+        return res.status(404).json({ success: false, message: txnError.message });
+      }
+      throw txnError;
+    } finally {
+      session.endSession();
     }
 
-    // Update password
-    user.password = newPassword;
-    await user.save();
-
-    // Mark OTP as used
-    otpRecord.isUsed = true;
-    await otpRecord.save();
-
-    console.log(`✅ Password reset successful for user: ${user.name} (${user.email})`);
+    console.log(`✅ Password reset successful for user: ${email}`);
 
     res.json({
       success: true,

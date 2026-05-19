@@ -36,7 +36,7 @@ const NotificationCenter = ({ isOpen, onClose }) => {
         ...(filter === 'unread' && { read: 'false' })
       });
 
-      const response = await api.get(`/notifications-api?${query}`);
+      const response = await api.get(`/notifications?${query}`);
       setNotifications(response.data.notifications);
       setTotal(response.data.total);
       setUnreadCount(response.data.unreadCount);
@@ -50,7 +50,7 @@ const NotificationCenter = ({ isOpen, onClose }) => {
 
   const fetchUnreadCount = async () => {
     try {
-      const response = await api.get('/notifications-api/counts');
+      const response = await api.get('/notifications/counts');
       setUnreadCount(response.data.total);
     } catch (error) {
       console.error('Failed to fetch unread count:', error);
@@ -60,7 +60,7 @@ const NotificationCenter = ({ isOpen, onClose }) => {
   const markAsRead = async (notificationId, event) => {
     event.stopPropagation();
     try {
-      await api.put(`/notifications-api/${notificationId}/read`);
+      await api.put(`/notifications/${notificationId}/read`);
       fetchNotifications();
       fetchUnreadCount();
       toast.success('Marked as read');
@@ -72,7 +72,7 @@ const NotificationCenter = ({ isOpen, onClose }) => {
 
   const markAllAsRead = async () => {
     try {
-      await api.put('/notifications-api/read-all');
+      await api.put('/notifications/read-all');
       fetchNotifications();
       fetchUnreadCount();
       toast.success('All notifications marked as read');
@@ -85,7 +85,7 @@ const NotificationCenter = ({ isOpen, onClose }) => {
   const deleteNotification = async (notificationId, event) => {
     event.stopPropagation();
     try {
-      await api.delete(`/notifications-api/${notificationId}`);
+      await api.delete(`/notifications/${notificationId}`);
       fetchNotifications();
       fetchUnreadCount();
       toast.success('Notification deleted');

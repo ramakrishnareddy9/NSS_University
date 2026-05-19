@@ -49,7 +49,8 @@ router.post('/', [
   authorize('admin'),
   body('yearLabel').trim().notEmpty().withMessage('Year label is required'),
   body('startMonth').isInt({ min: 1, max: 12 }).withMessage('Start month must be between 1 and 12'),
-  body('endMonth').isInt({ min: 1, max: 12 }).withMessage('End month must be between 1 and 12')
+  body('endMonth').isInt({ min: 1, max: 12 }).withMessage('End month must be between 1 and 12'),
+  body('certificateHoursRequired').optional().isFloat({ min: 0 }).withMessage('Certificate hours must be a non-negative number')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -57,7 +58,7 @@ router.post('/', [
       return res.status(400).json({ message: 'Validation failed', errors: errors.array() });
     }
 
-    const { yearLabel, startMonth, endMonth, isActive = true } = req.body;
+    const { yearLabel, startMonth, endMonth, certificateHoursRequired, isActive = true } = req.body;
     const normalizedYearLabel = String(yearLabel).trim();
 
     const existingConfig = await AcademicYearConfig.findOne({ yearLabel: normalizedYearLabel });
@@ -69,6 +70,7 @@ router.post('/', [
       yearLabel: normalizedYearLabel,
       startMonth: Number(startMonth),
       endMonth: Number(endMonth),
+      certificateHoursRequired: typeof certificateHoursRequired === 'undefined' ? undefined : Number(certificateHoursRequired),
       isActive: parseBoolean(isActive)
     });
 
@@ -85,7 +87,8 @@ router.put('/:id', [
   authorize('admin'),
   body('yearLabel').trim().notEmpty().withMessage('Year label is required'),
   body('startMonth').isInt({ min: 1, max: 12 }).withMessage('Start month must be between 1 and 12'),
-  body('endMonth').isInt({ min: 1, max: 12 }).withMessage('End month must be between 1 and 12')
+  body('endMonth').isInt({ min: 1, max: 12 }).withMessage('End month must be between 1 and 12'),
+  body('certificateHoursRequired').optional().isFloat({ min: 0 }).withMessage('Certificate hours must be a non-negative number')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -93,7 +96,7 @@ router.put('/:id', [
       return res.status(400).json({ message: 'Validation failed', errors: errors.array() });
     }
 
-    const { yearLabel, startMonth, endMonth, isActive = true } = req.body;
+    const { yearLabel, startMonth, endMonth, certificateHoursRequired, isActive = true } = req.body;
 
     const updatedConfig = await AcademicYearConfig.findByIdAndUpdate(
       req.params.id,
@@ -101,6 +104,7 @@ router.put('/:id', [
         yearLabel: String(yearLabel).trim(),
         startMonth: Number(startMonth),
         endMonth: Number(endMonth),
+        certificateHoursRequired: typeof certificateHoursRequired === 'undefined' ? undefined : Number(certificateHoursRequired),
         isActive: parseBoolean(isActive)
       },
       { new: true, runValidators: true }

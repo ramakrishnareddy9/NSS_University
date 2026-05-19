@@ -5,6 +5,10 @@ const Notification = require('../models/Notification');
 const { sendEventReminder } = require('../utils/notifications');
 const { auth, authorize } = require('../middleware/auth');
 
+// DEPRECATED: This file is not currently mounted in server.js.
+// Use /api/notification-scheduler (routes/notifications-scheduler.js) instead.
+// This file is kept for reference but should be consolidated/removed in future cleanup.
+
 // Note: node-cron is loaded conditionally to avoid issues if not installed
 let cron = null;
 try {
@@ -56,9 +60,10 @@ if (cron) {
   });
 }
 
-// @route   POST /api/notifications/send-reminder
+// @route   POST /api/notification-scheduler/send-reminder (NOT CURRENTLY USED - see notifications-scheduler.js instead)
 // @desc    Manually send event reminder
 // @access  Private (Admin/Faculty)
+// @deprecated Use /api/notification-scheduler/send-reminder instead
 router.post('/send-reminder', [auth, authorize('admin', 'faculty')], async (req, res) => {
   try {
     const { eventId, daysBefore = 1 } = req.body;

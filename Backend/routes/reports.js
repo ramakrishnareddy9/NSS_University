@@ -9,12 +9,25 @@ const Participation = require('../models/Participation');
 const Contribution = require('../models/Contribution');
 const User = require('../models/User');
 const Report = require('../models/Report');
+const AcademicYearConfig = require('../models/AcademicYearConfig');
 const { auth, authorize } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
 const { analyzeStudentReport, generateConsolidatedReport, generateEventSummary } = require('../services/geminiService');
 const { resolveAcademicYearContext } = require('../utils/academicYear');
 const redis = require('../config/redis');
-const redis = require('../config/redis');
+let promClient;
+let fileProxyBlockedCounter;
+try {
+  promClient = require('prom-client');
+  fileProxyBlockedCounter = new promClient.Counter({
+    name: 'nss_file_proxy_blocked_total',
+    help: 'Total number of file-proxy requests blocked due to size'
+  });
+} catch (e) {
+  // prom-client is optional — metrics will be disabled if not installed
+  promClient = null;
+  fileProxyBlockedCounter = null;
+}
 
 function addWrappedText(doc, text, startY, options = {}) {
   const {
@@ -244,6 +257,36 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
   try {
     const { year, academicYear, startMonth, endMonth } = req.query;
 
+    const parseAcademicYearRange = (yearLabel, config) => {
+      const normalized = String(yearLabel || '').trim();
+      const match = normalized.match(/^(\d{4})-(\d{2}|\d{4})$/);
+      if (!match) {
+        return null;
+      }
+
+      const startYear = parseInt(match[1], 10);
+      const endPart = match[2];
+      const parsedEndYear = endPart.length === 2
+        ? parseInt(`${String(startYear).slice(0, 2)}${endPart}`, 10)
+        : parseInt(endPart, 10);
+
+      const start = Number(config.startMonth);
+      const end = Number(config.endMonth);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1 || start > 12 || end < 1 || end > 12) {
+        return null;
+      }
+
+      const rangeStart = new Date(startYear, start - 1, 1, 0, 0, 0, 0);
+      const rangeEndYear = end >= start ? startYear : parsedEndYear;
+      const rangeEnd = new Date(rangeEndYear, end, 0, 23, 59, 59, 999);
+
+      return {
+        rangeStart,
+        rangeEnd,
+        label: normalized
+      };
+    };
+
     const buildMonthRange = (yearValue, startMonthValue, endMonthValue) => {
       const reportYear = parseInt(yearValue, 10);
       const start = parseInt(startMonthValue, 10);
@@ -266,7 +309,21 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
       return { rangeStart, rangeEnd, label: `${reportYear}-${String(start).padStart(2, '0')}-${String(end).padStart(2, '0')}` };
     };
 
-    const academicContext = academicYear || year ? await resolveAcademicYearContext(academicYear || year) : null;
+    let academicContext = null;
+    if (academicYear) {
+      const config = await AcademicYearConfig.findOne({ yearLabel: String(academicYear).trim(), isActive: true });
+      if (!config) {
+        return res.status(400).json({ message: `Academic year config not found or inactive: ${academicYear}` });
+      }
+
+      academicContext = parseAcademicYearRange(academicYear, config);
+      if (!academicContext) {
+        return res.status(400).json({ message: 'academicYear must be in YYYY-YY format (e.g., 2024-25)' });
+      }
+    } else if (year) {
+      academicContext = await resolveAcademicYearContext(year);
+    }
+
     const monthRange = !academicContext && startMonth && endMonth ? buildMonthRange(year || new Date().getFullYear(), startMonth, endMonth) : null;
     const fallbackYear = year || new Date().getFullYear();
     const defaultRange = {
@@ -280,19 +337,18 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
 
     const events = await Event.find({
       isDeleted: { $ne: true },
-      $or: [
-        { academicYear: label },
-        { startDate: { $gte: rangeStart, $lte: rangeEnd } }
-      ]
+      startDate: { $gte: rangeStart, $lte: rangeEnd }
     });
 
+    const eventIds = events.map((event) => event._id);
+
     const participations = await Participation.find({
-      createdAt: { $gte: rangeStart, $lte: rangeEnd },
+      event: { $in: eventIds },
       isDeleted: { $ne: true }
     }).populate('student', 'name email studentId department year');
 
     const contributions = await Contribution.find({
-      submittedAt: { $gte: rangeStart, $lte: rangeEnd },
+      event: { $in: eventIds },
       isDeleted: { $ne: true }
     }).populate('student', 'name email studentId');
 
@@ -832,15 +888,38 @@ router.post('/admin/event-summary/:eventId', [auth, authorize('admin', 'faculty'
 });
 
 // @route   GET /api/reports/file-proxy
-// @desc    Proxy Cloudinary report files and force inline preview
+// @desc    Provide safe access to Cloudinary report files: generate signed URLs when possible
+//          or redirect to the existing Cloudinary URL. Protects server from buffering large files.
 // @access  Private (Admin/Faculty)
 router.get('/file-proxy', [auth, authorize('admin', 'faculty')], async (req, res) => {
   try {
-    const maxProxyFileSizeBytes = 50 * 1024 * 1024;
+    const defaultMax = 50 * 1024 * 1024;
+    const maxProxyFileSizeBytes = Number(process.env.MAX_PROXY_FILE_BYTES || defaultMax);
     const fileUrl = req.query.url;
+    const publicId = req.query.publicId;
+    const resourceType = req.query.resourceType || 'raw';
+
+    // Prefer signed URL generation when publicId is provided.
+    if (publicId && typeof publicId === 'string') {
+      // Ensure we only generate signed URLs for our NSS folder to avoid misuse
+      if (!publicId.includes('nss-reports') && !publicId.startsWith('nss-reports/')) {
+        console.warn('Attempt to request signed URL for non-nss publicId:', publicId);
+        return res.status(400).json({ message: 'Invalid publicId' });
+      }
+
+      // Generate signed URL via Cloudinary SDK (sign_url=true)
+      try {
+        const signedUrl = cloudinary.url(publicId, { sign_url: true, secure: true, resource_type: resourceType });
+        res.setHeader('Cache-Control', 'no-cache');
+        return res.redirect(302, signedUrl);
+      } catch (err) {
+        console.error('Failed to generate signed Cloudinary URL:', err);
+        return res.status(500).json({ message: 'Failed to generate signed URL' });
+      }
+    }
 
     if (!fileUrl || typeof fileUrl !== 'string') {
-      return res.status(400).json({ message: 'File URL is required' });
+      return res.status(400).json({ message: 'File URL or publicId is required' });
     }
 
     // Basic safety check: only allow Cloudinary NSS report URLs
@@ -848,45 +927,29 @@ router.get('/file-proxy', [auth, authorize('admin', 'faculty')], async (req, res
       return res.status(400).json({ message: 'Invalid file URL' });
     }
 
-    console.log('📄 Proxying file:', fileUrl);
+    console.log('📄 Preparing redirect to Cloudinary file URL:', fileUrl);
 
-    const response = await fetch(fileUrl);
-    if (!response.ok) {
-      console.error('Cloudinary fetch failed:', response.status, await response.text().catch(() => ''));
-      return res.status(502).json({ message: 'Failed to fetch file from storage' });
+    // Perform a lightweight HEAD request to check Content-Length and avoid redirecting very large files.
+    try {
+      const headResp = await fetch(fileUrl, { method: 'HEAD' });
+      if (headResp.ok) {
+        const contentLengthHeader = headResp.headers.get('content-length');
+        const contentLength = contentLengthHeader ? Number(contentLengthHeader) : null;
+        if (contentLength !== null && Number.isFinite(contentLength) && contentLength > maxProxyFileSizeBytes) {
+          console.warn('Blocked file proxy/redirect due to size:', contentLength, 'bytes, url:', fileUrl);
+          if (fileProxyBlockedCounter) fileProxyBlockedCounter.inc();
+          return res.status(413).json({ message: 'File is too large to proxy or redirect safely' });
+        }
+      } else {
+        console.warn('Cloudinary HEAD request failed, status:', headResp.status);
+      }
+    } catch (headErr) {
+      console.warn('HEAD request to Cloudinary failed, proceeding with redirect:', headErr.message);
     }
 
-    const contentLengthHeader = response.headers.get('content-length');
-    const contentLength = contentLengthHeader ? Number(contentLengthHeader) : null;
-    if (contentLength !== null && Number.isFinite(contentLength) && contentLength > maxProxyFileSizeBytes) {
-      return res.status(413).json({ message: 'File is too large to proxy' });
-    }
-
-    const contentType = response.headers.get('content-type') || 'application/octet-stream';
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    console.log('✅ File fetched, size:', buffer.length, 'bytes, type:', contentType);
-
-    // Determine content type from URL if Cloudinary doesn't provide it correctly
-    let finalContentType = contentType;
-    if (fileUrl.includes('.pdf')) {
-      finalContentType = 'application/pdf';
-    } else if (fileUrl.match(/\.(jpg|jpeg)$/i)) {
-      finalContentType = 'image/jpeg';
-    } else if (fileUrl.includes('.png')) {
-      finalContentType = 'image/png';
-    } else if (fileUrl.match(/\.(doc|docx)$/i)) {
-      finalContentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-    }
-
-    res.setHeader('Content-Type', finalContentType);
-    res.setHeader('Content-Length', buffer.length);
-    // Force inline display; browser will show if it knows the type (e.g. PDF)
-    res.setHeader('Content-Disposition', 'inline');
-    // Prevent caching issues
+    // Redirect the client directly to Cloudinary URL to avoid loading the file into server memory.
     res.setHeader('Cache-Control', 'no-cache');
-    res.send(buffer);
+    return res.redirect(302, fileUrl);
   } catch (error) {
     console.error('File proxy error:', error);
     res.status(500).json({ message: 'Failed to proxy file', error: error.message });

@@ -46,12 +46,9 @@ const Login = () => {
     try {
       const result = await login(data.email, data.password);
       if (result.success) {
-        // Wait a bit for user to be set in context
-        setTimeout(() => {
-          const user = JSON.parse(localStorage.getItem('user') || '{}');
-          const role = user.role || 'student';
-          navigate(`/${role}/dashboard`);
-        }, 100);
+        // Use the returned user object directly instead of reading from localStorage
+        const role = result.user?.role || 'student';
+        navigate(`/${role}/dashboard`);
       } else if (result.error && result.error.toLowerCase().includes('email not verified')) {
         localStorage.setItem('pendingVerificationEmail', data.email.toLowerCase());
         navigate('/verify-email', { state: { email: data.email.toLowerCase() } });

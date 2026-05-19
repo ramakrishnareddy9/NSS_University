@@ -53,7 +53,7 @@ if (cron) {
   });
 }
 
-// @route   POST /api/scheduler/send-reminder
+// @route   POST /api/notification-scheduler/send-reminder
 // @desc    Manually send event reminder
 // @access  Private (Admin/Faculty)
 router.post('/send-reminder', [auth, authorize('admin', 'faculty')], async (req, res) => {
@@ -96,7 +96,7 @@ router.post('/send-reminder', [auth, authorize('admin', 'faculty')], async (req,
   }
 });
 
-// @route   DELETE /api/scheduler/clear
+// @route   DELETE /api/notification-scheduler/clear
 // @desc    Clear all notifications for current user
 // @access  Private
 router.delete('/clear', auth, async (req, res) => {

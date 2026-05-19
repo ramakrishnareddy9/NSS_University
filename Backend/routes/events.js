@@ -4,6 +4,7 @@ const Event = require('../models/Event');
 const Participation = require('../models/Participation');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
+const AuditLog = require('../models/AuditLog');
 const { auth, authorize } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
 const { sendNewEventNotification } = require('../utils/notifications');
@@ -100,13 +101,37 @@ router.get('/', auth, async (req, res) => {
   try {
     const { status, eventType, search, academicYear } = req.query;
     const query = {};
+    const MAX_SEARCH_LENGTH = 200; // guard against ReDoS by limiting user-controlled regex input
 
     if (req.user.role === 'student') {
       query.status = { $in: allowedStudentStatuses };
     }
 
-    if (status && (req.user.role !== 'student' || allowedStudentStatuses.includes(status))) {
-      query.status = status;
+    if (status) {
+      // Students may only request statuses within the allowed set; admins/faculty can request any status
+      if (req.user.role === 'student') {
+        const s = String(status);
+        if (allowedStudentStatuses.includes(s)) {
+          query.status = s;
+        } else {
+          // Ignore disallowed status values from students to prevent enumeration of drafts
+          AuditLog.create({
+            action: 'ATTEMPTED_STATUS_FILTER_BYPASS',
+            actor: req.user.id,
+            targetModel: 'Event',
+            details: {
+              requestedStatus: s,
+              allowedStatuses: allowedStudentStatuses,
+              ip: req.ip,
+              userAgent: req.get('user-agent')
+            }
+          }).catch(err => {
+            console.error('Failed to log status filter bypass attempt:', err.message);
+          });
+        }
+      } else {
+        query.status = status;
+      }
     }
 
     if (eventType) {
@@ -118,7 +143,9 @@ router.get('/', auth, async (req, res) => {
     }
 
     if (search) {
-      const safeSearch = escapeRegex(search.trim());
+      const trimmed = String(search).trim();
+      const capped = trimmed.length > MAX_SEARCH_LENGTH ? trimmed.slice(0, MAX_SEARCH_LENGTH) : trimmed;
+      const safeSearch = escapeRegex(capped);
       query.$or = [
         { title: { $regex: safeSearch, $options: 'i' } },
         { description: { $regex: safeSearch, $options: 'i' } }
@@ -141,7 +168,7 @@ router.get('/', auth, async (req, res) => {
         const cursorId = mongoose.Types.ObjectId(cursor);
         query._id = { $lt: cursorId };
       } catch (e) {
-        return res.status(400).json({ message: 'Invalid cursor' });
+        return res.status(400).json({ success: false, message: 'Invalid cursor' });
       }
 
       events = await Event.find(query)
@@ -212,10 +239,10 @@ router.get('/', auth, async (req, res) => {
 
     const nextCursor = mapped.length > 0 ? String(mapped[mapped.length - 1]._id) : null;
 
-    res.json({ data: mapped, nextCursor, hasMore });
+    res.json({ success: true, data: mapped, nextCursor, hasMore });
   } catch (error) {
     console.error('Get events error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -236,7 +263,7 @@ router.get('/:id', auth, validateObjectId('id'), async (req, res) => {
       });
 
     if (!event) {
-      return res.status(404).json({ message: 'Event not found' });
+      return res.status(404).json({ success: false, message: 'Event not found' });
     }
 
     const plain = event.toObject();
@@ -245,10 +272,10 @@ router.get('/:id', auth, validateObjectId('id'), async (req, res) => {
       plain.participationStatus = participation ? participation.status : null;
     }
 
-    res.json(plain);
+    res.json({ success: true, data: plain });
   } catch (error) {
     console.error('Get event error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -277,11 +304,11 @@ router.post('/', [
     const regDeadline = new Date(req.body.registrationDeadline);
 
     if (!(end > start)) {
-      return res.status(400).json({ message: 'endDate must be after startDate' });
+      return res.status(400).json({ success: false, message: 'endDate must be after startDate' });
     }
 
     if (!(regDeadline < start)) {
-      return res.status(400).json({ message: 'registrationDeadline must be before startDate' });
+      return res.status(400).json({ success: false, message: 'registrationDeadline must be before startDate' });
     }
 
     const academicYearContext = await resolveAcademicYearContext(undefined, start);
@@ -306,10 +333,10 @@ router.post('/', [
       console.warn('Cache invalidation failed after event create:', cacheErr.message);
     }
 
-    res.status(201).json(event);
+    res.status(201).json({ success: true, data: event });
   } catch (error) {
     console.error('Create event error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -319,12 +346,12 @@ router.post('/', [
 router.post('/:id/publish', auth, validateObjectId('id'), async (req, res) => {
   try {
     if (!['admin', 'faculty'].includes(req.user.role)) {
-      return res.status(403).json({ message: 'Access denied. Only Admin and Faculty can publish events.' });
+      return res.status(403).json({ success: false, message: 'Access denied. Only Admin and Faculty can publish events.' });
     }
 
     const event = await Event.findById(req.params.id);
     if (!event) {
-      return res.status(404).json({ message: 'Event not found' });
+      return res.status(404).json({ success: false, message: 'Event not found' });
     }
 
     event.status = 'published';
@@ -341,10 +368,10 @@ router.post('/:id/publish', auth, validateObjectId('id'), async (req, res) => {
       console.warn('Cache invalidation failed after publish:', cacheErr.message);
     }
 
-    res.json(event);
+    res.json({ success: true, data: event });
   } catch (error) {
     console.error('Publish event error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -355,14 +382,39 @@ router.put('/:id', [auth, authorize('admin', 'faculty'), validateObjectId('id')]
   try {
     const event = await Event.findById(req.params.id);
     if (!event) {
-      return res.status(404).json({ message: 'Event not found' });
+      return res.status(404).json({ success: false, message: 'Event not found' });
     }
 
     if (event.organizer.toString() !== req.user.id && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Not authorized to update this event' });
+      return res.status(403).json({ success: false, message: 'Not authorized to update this event' });
     }
 
     Object.assign(event, req.body);
+
+    // Cross-field date validation (same invariants as create route)
+    const start = event.startDate ? new Date(event.startDate) : null;
+    const end = event.endDate ? new Date(event.endDate) : null;
+    const regDeadline = event.registrationDeadline ? new Date(event.registrationDeadline) : null;
+
+    if (start && Number.isNaN(start.getTime())) {
+      return res.status(400).json({ success: false, message: 'Valid start date is required' });
+    }
+
+    if (end && Number.isNaN(end.getTime())) {
+      return res.status(400).json({ success: false, message: 'Valid end date is required' });
+    }
+
+    if (regDeadline && Number.isNaN(regDeadline.getTime())) {
+      return res.status(400).json({ success: false, message: 'Valid registration deadline is required' });
+    }
+
+    if (start && end && !(end > start)) {
+      return res.status(400).json({ success: false, message: 'endDate must be after startDate' });
+    }
+
+    if (start && regDeadline && !(regDeadline < start)) {
+      return res.status(400).json({ success: false, message: 'registrationDeadline must be before startDate' });
+    }
 
     if (event.startDate) {
       const academicYearContext = await resolveAcademicYearContext(undefined, event.startDate);
@@ -380,10 +432,10 @@ router.put('/:id', [auth, authorize('admin', 'faculty'), validateObjectId('id')]
       console.warn('Cache invalidation failed after event update:', cacheErr.message);
     }
 
-    res.json(event);
+    res.json({ success: true, data: event });
   } catch (error) {
     console.error('Update event error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 

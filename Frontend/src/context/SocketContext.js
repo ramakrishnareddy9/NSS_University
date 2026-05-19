@@ -19,14 +19,13 @@ export const SocketProvider = ({ children }) => {
   const [socket, setSocket] = useState(null);
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
-  const [socketEnabled] = useState(true); // eslint-disable-line no-unused-vars
   const [connectionStatus, setConnectionStatus] = useState('disconnected'); // Track connection status
 
   const fetchStoredNotifications = useCallback(async () => {
     if (!isAuthenticated || !user) return;
 
     try {
-      const response = await api.get('/notifications-api');
+      const response = await api.get('/notifications');
       if (response.data.notifications) {
         // Convert database notifications to frontend format
         const formattedNotifications = response.data.notifications.map(notif => ({
@@ -65,7 +64,7 @@ export const SocketProvider = ({ children }) => {
   }, [isAuthenticated, user, fetchStoredNotifications]);
 
   useEffect(() => {
-    if (isAuthenticated && user && socketEnabled) {
+    if (isAuthenticated && user) {
 
       const socketUrl = process.env.REACT_APP_SOCKET_URL;
 
@@ -177,59 +176,7 @@ export const SocketProvider = ({ children }) => {
         });
       });
 
-      // Also listen for broadcast events
-      newSocket.on('new-event-broadcast', async (data) => {
-        // Only process if user is a student
-        if (user.role === 'student') {
-          const notification = {
-            id: Date.now(),
-            type: 'new-event',
-            message: data.message,
-            event: data.event,
-            timestamp: data.timestamp || new Date(),
-            read: false
-          };
-          setNotifications(prev => [notification, ...prev]);
-          setUnreadCount(prev => prev + 1);
-
-          // Refresh stored notifications
-          fetchStoredNotifications();
-
-          toast.success(data.message || 'New event available!', {
-            duration: 5000,
-            onClick: () => {
-              window.location.href = '/student/events';
-            }
-          });
-        }
-      });
-
-      newSocket.on('participation-approved-broadcast', async (data) => {
-        const userId = user._id || user.id;
-        if (data.targetUserId === userId.toString()) {
-          // Same handling as regular participation-approved
-          const notification = {
-            id: Date.now(),
-            type: 'participation-approved',
-            message: data.message,
-            participation: data.participation,
-            timestamp: data.timestamp || new Date(),
-            read: false
-          };
-          setNotifications(prev => [notification, ...prev]);
-          setUnreadCount(prev => prev + 1);
-
-          // Refresh stored notifications
-          fetchStoredNotifications();
-
-          toast.success(data.message || 'Your participation has been approved!', {
-            duration: 5000,
-            onClick: () => {
-              window.location.href = '/student/profile';
-            }
-          });
-        }
-      });
+      // Broadcast listeners removed - using room-targeted events only (new-event, participation-approved)
 
       newSocket.on('room-joined', (data) => {
         // Silently acknowledge room join
@@ -268,7 +215,7 @@ export const SocketProvider = ({ children }) => {
     // Update in database if it's a stored notification
     if (typeof notificationId === 'string' && notificationId.length > 10) {
       try {
-        await api.put(`/notifications-api/${notificationId}/read`);
+        await api.put(`/notifications/${notificationId}/read`);
       } catch (error) {
         console.error('Error marking notification as read:', error);
       }
@@ -284,7 +231,7 @@ export const SocketProvider = ({ children }) => {
 
     // Update in database
     try {
-      await api.put('/notifications-api/read-all');
+      await api.put('/notifications/read-all');
     } catch (error) {
       console.error('Error marking all as read:', error);
     }
@@ -293,7 +240,7 @@ export const SocketProvider = ({ children }) => {
   const clearNotifications = async () => {
     try {
       // Clear from backend
-      await api.delete('/notifications-api/clear');
+      await api.delete('/notifications/clear');
 
       // Clear from local state
       setNotifications([]);

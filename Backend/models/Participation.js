@@ -88,6 +88,9 @@ const participationSchema = new mongoose.Schema({
 participationSchema.index({ student: 1, event: 1 }, { unique: true });
 // Index for efficient waitlist queries
 participationSchema.index({ event: 1, waitlistStatus: 1, waitlistedAt: 1 });
+// Indexes for admin approval queries
+participationSchema.index({ event: 1, status: 1 });
+participationSchema.index({ student: 1, status: 1 });
 
 module.exports = mongoose.model('Participation', participationSchema);
 

@@ -1,6 +1,12 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
+// Ensure JWT secret is defined — do not allow any fallback defaults.
+if (!process.env.JWT_SECRET || !process.env.JWT_SECRET.trim()) {
+  console.error('FATAL: JWT_SECRET environment variable is not set. Aborting startup.');
+  throw new Error('JWT_SECRET environment variable is required');
+}
+
 const jwtSecret = process.env.JWT_SECRET;
 
 const auth = async (req, res, next) => {

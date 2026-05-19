@@ -285,20 +285,22 @@ exports.approveProblem = async (req, res) => {
     const eventStartDate = eventDate ? new Date(eventDate) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const eventEndDate = new Date(eventStartDate);
     eventEndDate.setHours(eventStartDate.getHours() + 4); // Default 4-hour event
-    let regDeadline = new Date(eventStartDate);
-    regDeadline.setDate(regDeadline.getDate() - 1); // Registration closes 1 day before
+    const desiredRegistrationDeadline = new Date(eventStartDate);
+    desiredRegistrationDeadline.setDate(desiredRegistrationDeadline.getDate() - 1); // Registration closes 1 day before
 
     // Enforce a minimum registration lead time so students have time to register
     const now = new Date();
     const minLeadHours = parseInt(appConfig.MIN_REGISTRATION_LEAD_HOURS, 10) || 2;
     const minAllowedDeadline = new Date(now.getTime() + minLeadHours * 60 * 60 * 1000);
+    let regDeadline = new Date(Math.max(minAllowedDeadline.getTime(), desiredRegistrationDeadline.getTime()));
     let registrationDeadlineAdjusted = false;
     let originalRegistrationDeadline = null;
-    if (regDeadline < now) {
-      originalRegistrationDeadline = regDeadline;
-      regDeadline = minAllowedDeadline;
+    if (regDeadline.getTime() !== desiredRegistrationDeadline.getTime()) {
+      originalRegistrationDeadline = desiredRegistrationDeadline;
       registrationDeadlineAdjusted = true;
     }
+    const leadTimeHoursUntilStart = (eventStartDate.getTime() - now.getTime()) / (60 * 60 * 1000);
+    const shortLeadTime = leadTimeHoursUntilStart < 24;
 
     const session = await mongoose.startSession();
     let event;
@@ -381,6 +383,36 @@ exports.approveProblem = async (req, res) => {
         });
       } catch (notifyErr) {
         console.error('Failed to create admin notification for reg-deadline adjustment:', notifyErr);
+      }
+    }
+
+    if (shortLeadTime) {
+      try {
+        await AuditLog.create({
+          action: 'event_short_lead_time_warning',
+          actor: req.user._id,
+          targetModel: 'Problem',
+          targetId: problem._id,
+          details: {
+            eventStartDate,
+            leadTimeHoursUntilStart,
+            note: 'Problem-approved event starts in less than 24 hours'
+          }
+        });
+      } catch (logErr) {
+        console.error('Failed to write AuditLog for short lead-time warning:', logErr);
+      }
+
+      try {
+        await Notification.create({
+          user: req.user._id,
+          type: 'event-short-lead-warning',
+          message: `Event created from problem "${problem.title}" starts in less than 24 hours (${Math.max(0, Math.round(leadTimeHoursUntilStart * 10) / 10)}h lead time).`,
+          data: { problemId: problem._id, eventStartDate, leadTimeHoursUntilStart },
+          read: false
+        });
+      } catch (notifyErr) {
+        console.error('Failed to create admin notification for short lead-time warning:', notifyErr);
       }
     }
 
@@ -557,54 +589,75 @@ exports.rejectProblem = async (req, res) => {
  * @access  Private (Admin/Faculty)
  */
 exports.resolveProblem = async (req, res) => {
+  const session = await mongoose.startSession();
   try {
-    const problem = await Problem.findById(req.params.id)
-      .populate('reportedBy', 'name email rewardPoints');
+    let problem;
+    let reporter;
 
-    if (!problem) {
-      return res.status(404).json({
-        success: false,
-        message: 'Problem not found'
-      });
-    }
+    await session.withTransaction(async () => {
+      problem = await Problem.findById(req.params.id)
+        .populate('reportedBy', 'name email rewardPoints')
+        .session(session);
 
-    if (problem.status !== 'approved') {
-      return res.status(400).json({
-        success: false,
-        message: 'Only approved problems can be marked as resolved'
-      });
-    }
+      if (!problem) {
+        const err = new Error('Problem not found');
+        err.statusCode = 404;
+        throw err;
+      }
 
-    problem.status = 'resolved';
-    problem.resolvedAt = new Date();
-    await problem.save();
+      if (problem.status !== 'approved') {
+        const err = new Error('Only approved problems can be marked as resolved');
+        err.statusCode = 400;
+        throw err;
+      }
 
-    // Award additional points for resolution
-    const reporter = await User.findById(problem.reportedBy._id);
-    reporter.rewardPoints += POINTS_CONFIG.PROBLEM_RESOLVED;
-    await reporter.save();
+      problem.status = 'resolved';
+      problem.resolvedAt = new Date();
+      await problem.save({ session });
 
-    try {
-      await redis.purgePattern('leaderboard:*');
-      await redis.del('landing:stats');
-    } catch (cacheErr) {
-      console.warn('Redis purge failed after resolveProblem:', cacheErr.message);
-    }
-
-    res.status(200).json({
-      success: true,
-      message: 'Problem marked as resolved',
-      data: problem,
-      additionalPoints: POINTS_CONFIG.PROBLEM_RESOLVED
+      // Award additional points for resolution (within transaction)
+      reporter = await User.findById(problem.reportedBy._id).session(session);
+      reporter.rewardPoints += POINTS_CONFIG.PROBLEM_RESOLVED;
+      await reporter.save({ session });
     });
   } catch (error) {
+    if (error.statusCode === 404) {
+      return res.status(404).json({
+        success: false,
+        message: error.message
+      });
+    }
+    if (error.statusCode === 400) {
+      return res.status(400).json({
+        success: false,
+        message: error.message
+      });
+    }
+
     console.error('Error resolving problem:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to resolve problem',
       error: error.message
     });
+    return;
+  } finally {
+    session.endSession();
   }
+
+  try {
+    await redis.purgePattern('leaderboard:*');
+    await redis.del('landing:stats');
+  } catch (cacheErr) {
+    console.warn('Redis purge failed after resolveProblem:', cacheErr.message);
+  }
+
+  res.status(200).json({
+    success: true,
+    message: 'Problem marked as resolved',
+    data: problem,
+    additionalPoints: POINTS_CONFIG.PROBLEM_RESOLVED
+  });
 };
 
 /**
@@ -669,6 +722,8 @@ exports.getLeaderboard = async (req, res) => {
           _id: 1,
           problemsInPeriod: 1,
           approvedProblems: 1,
+          name: '$user.name',
+          department: '$user.department',
           reportingScore: '$user.reportingScore',
           badges: '$user.badges'
         } 
@@ -679,21 +734,20 @@ exports.getLeaderboard = async (req, res) => {
 
     const topReporters = await Problem.aggregate(pipeline);
 
-    const anonymizedLeaderboard = topReporters.map((reporter, index) => ({
+    const leaderboard = topReporters.map((reporter, index) => ({
       rank: index + 1,
-      anonymousId: `reporter-${index + 1}`,
-      reportingScore: reporter.reportingScore,
-      problemsReported: reporter.problemsInPeriod,
-      problemsApproved: reporter.approvedProblems,
+      name: reporter.name || 'Unknown',
+      department: reporter.department || 'N/A',
+      points: reporter.reportingScore || 0,
       badges: reporter.badges || [],
       period: period
     }));
 
     const response = {
       success: true,
-      count: anonymizedLeaderboard.length,
+      count: leaderboard.length,
       period: period,
-      data: anonymizedLeaderboard
+      data: leaderboard
     };
 
     try {

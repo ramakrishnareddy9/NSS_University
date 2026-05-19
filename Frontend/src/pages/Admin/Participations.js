@@ -500,7 +500,7 @@ const AdminParticipations = () => {
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
-          <h1 className="text-3xl 나 font-bold text-gray-900">Participation Management</h1>
+          <h1 className="text-3xl font-bold text-gray-900">Participation Management</h1>
           <p className="mt-2 text-gray-600">
             Upload attendance sheets, review AI suggestions, then confirm approvals or rejections in bulk.
           </p>

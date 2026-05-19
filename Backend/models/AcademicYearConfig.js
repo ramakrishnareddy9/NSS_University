@@ -19,6 +19,11 @@ const academicYearConfigSchema = new mongoose.Schema({
     min: 1,
     max: 12
   },
+  certificateHoursRequired: {
+    type: Number,
+    min: 0,
+    default: 240
+  },
   isActive: {
     type: Boolean,
     default: true

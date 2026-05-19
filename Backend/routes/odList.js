@@ -66,13 +66,17 @@ router.get('/event/:eventId', [auth, authorize('admin', 'faculty')], async (req,
 
 
 
+    // Compute event times once (outside the map callback to ensure they're available for the response)
+
+    const eventStartTime = new Date(event.startDate).toTimeString().slice(0, 5);
+
+    const eventEndTime = new Date(event.endDate).toTimeString().slice(0, 5);
+
+
+
     const odList = approvedParticipants.map(participation => {
 
       const student = participation.student;
-
-      const eventStartTime = new Date(event.startDate).toTimeString().slice(0, 5);
-
-      const eventEndTime = new Date(event.endDate).toTimeString().slice(0, 5);
 
       
 
@@ -200,6 +204,14 @@ router.get('/event/:eventId/download', [auth, authorize('admin', 'faculty')], as
 
 
 
+    // Compute event times once (to avoid recomputing in loop)
+
+    const eventStartTime = new Date(event.startDate).toTimeString().slice(0, 5);
+
+    const eventEndTime = new Date(event.endDate).toTimeString().slice(0, 5);
+
+
+
     // Prepare data for Excel
 
     const excelData = [];
@@ -214,7 +226,7 @@ router.get('/event/:eventId/download', [auth, authorize('admin', 'faculty')], as
 
     excelData.push(['Date:', new Date(event.startDate).toLocaleDateString()]);
 
-    excelData.push(['Time:', `${new Date(event.startDate).toTimeString().slice(0, 5)} - ${new Date(event.endDate).toTimeString().slice(0, 5)}`]);
+    excelData.push(['Time:', `${eventStartTime} - ${eventEndTime}`]);
 
     excelData.push([]); // Empty row
 
@@ -249,10 +261,6 @@ router.get('/event/:eventId/download', [auth, authorize('admin', 'faculty')], as
     approvedParticipants.forEach(participation => {
 
       const student = participation.student;
-
-      const eventStartTime = new Date(event.startDate).toTimeString().slice(0, 5);
-
-      const eventEndTime = new Date(event.endDate).toTimeString().slice(0, 5);
 
       
 

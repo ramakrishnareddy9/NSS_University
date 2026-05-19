@@ -66,7 +66,7 @@ router.get('/', auth, async (req, res) => {
       .skip(skip)
       .limit(limit);
 
-    res.json({ success: true, ...buildPagedResponse(contributions, total, page, limit) });
+    res.json(buildPagedResponse(contributions, total, page, limit));
   } catch (error) {
     console.error('Get contributions error:', error);
     res.status(500).json({ success: false, message: 'Server error' });

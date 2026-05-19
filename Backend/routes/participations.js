@@ -84,7 +84,7 @@ router.get('/', auth, async (req, res) => {
     res.json(buildPagedResponse(participations, total, page, limit));
   } catch (error) {
     console.error('Get participations error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -96,7 +96,7 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
     const { eventId } = req.body;
 
     if (!eventId) {
-      return res.status(400).json({ message: 'Event ID is required' });
+      return res.status(400).json({ success: false, message: 'Event ID is required' });
     }
 
     const session = await mongoose.startSession();
@@ -619,6 +619,22 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
       return res.status(404).json({ message: 'Participation not found' });
     }
 
+    // If client supplies volunteerHours, validate it against event duration cap and reject out-of-range values.
+    // The system still computes authoritative hours from event schedule during save.
+    if (typeof req.body.volunteerHours !== 'undefined') {
+      const requestedHours = Number(req.body.volunteerHours);
+      if (!Number.isFinite(requestedHours) || requestedHours < 0) {
+        return res.status(400).json({ message: 'volunteerHours must be a non-negative number' });
+      }
+
+      const { maxAllowedHours } = getEventVolunteerHours(participation.event);
+      if (requestedHours > maxAllowedHours) {
+        return res.status(400).json({
+          message: `volunteerHours exceeds allowed maximum (${maxAllowedHours}h) for this event`
+        });
+      }
+    }
+
     // Enforce attendance marking window: only allow within X days after event endDate
     const graceDays = parseInt(appConfig.ATTENDANCE_MARKING_GRACE_DAYS, 10) || 7;
     if (participation.event && participation.event.endDate) {
@@ -659,6 +675,8 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
 
     const session = await mongoose.startSession();
     let auditPayload = null;
+    let attendanceChangeAudit = null;
+    let lateAttendanceWarning = null;
     try {
       await session.withTransaction(async () => {
         const participationInTxn = await Participation.findById(participation._id)
@@ -672,6 +690,36 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
         participationInTxn.attendance = attended;
         participationInTxn.attendanceDate = attended ? new Date() : null;
         participationInTxn.status = attended ? 'attended' : participationInTxn.status;
+
+        if (wasAttended !== attended) {
+          const nowTs = new Date();
+          const eventEndDate = participationInTxn.event?.endDate ? new Date(participationInTxn.event.endDate) : null;
+          const lateThreshold = eventEndDate
+            ? new Date(eventEndDate.getTime() + graceDays * 24 * 60 * 60 * 1000)
+            : null;
+          const isLateChange = !!(lateThreshold && nowTs > lateThreshold);
+          if (isLateChange) {
+            lateAttendanceWarning = `Attendance was changed more than ${graceDays} days after event end date.`;
+            console.warn(lateAttendanceWarning);
+          }
+
+          attendanceChangeAudit = {
+            action: 'attendance_changed',
+            actor: req.user._id,
+            targetModel: 'Participation',
+            targetId: participationInTxn._id,
+            details: {
+              eventId: participationInTxn.event?._id || participationInTxn.event,
+              studentId: participationInTxn.student?._id || participationInTxn.student,
+              previousAttendance: wasAttended,
+              newAttendance: attended,
+              changedAt: nowTs,
+              eventEndDate,
+              lateThreshold,
+              isLateChange
+            }
+          };
+        }
 
         // Calculate volunteer hours if marking as attended
         if (attended && !wasAttended) {
@@ -774,6 +822,14 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
       }
     }
 
+    if (attendanceChangeAudit) {
+      try {
+        await AuditLog.create(attendanceChangeAudit);
+      } catch (logErr) {
+        console.error('Failed to write AuditLog for attendance change:', logErr);
+      }
+    }
+
     await participation.populate('student', 'name email studentId totalVolunteerHours');
     await participation.populate('event', 'title eventType');
 
@@ -800,6 +856,12 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
 
     console.log('📤 Sending response with updated data');
     console.log('=== END ATTENDANCE MARKING ===\n');
+    if (lateAttendanceWarning) {
+      return res.json({
+        ...participation.toObject(),
+        warning: lateAttendanceWarning
+      });
+    }
     res.json(participation);
 
   } catch (error) {

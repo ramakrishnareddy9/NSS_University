@@ -11,11 +11,18 @@ import {
 } from '@heroicons/react/24/outline';
 import VibrantPageLayout from '../../components/VibrantPageLayout';
 import anime from 'animejs/lib/anime.es.js';
+import toast from 'react-hot-toast';
 
 const AdminDashboard = () => {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [showNotificationIframe, setShowNotificationIframe] = useState(false);
+  const [showNotificationModal, setShowNotificationModal] = useState(false);
+  const [notificationForm, setNotificationForm] = useState({
+    title: '',
+    message: '',
+    targetRole: 'all'
+  });
+  const [sendingNotification, setSendingNotification] = useState(false);
 
   useEffect(() => {
     fetchStats();
@@ -60,6 +67,32 @@ const AdminDashboard = () => {
       console.error('Error fetching stats:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSendNotification = async (e) => {
+    e.preventDefault();
+    
+    if (!notificationForm.title.trim() || !notificationForm.message.trim()) {
+      toast.error('Please fill in all fields');
+      return;
+    }
+
+    setSendingNotification(true);
+    try {
+      await api.post('/notifications', {
+        title: notificationForm.title,
+        message: notificationForm.message,
+        targetRole: notificationForm.targetRole
+      });
+      
+      toast.success('Notification sent successfully');
+      setNotificationForm({ title: '', message: '', targetRole: 'all' });
+      setShowNotificationModal(false);
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Failed to send notification');
+    } finally {
+      setSendingNotification(false);
     }
   };
 
@@ -212,11 +245,11 @@ const AdminDashboard = () => {
 
       {/* Floating Notification Button */}
       <button
-        onClick={() => setShowNotificationIframe(!showNotificationIframe)}
+        onClick={() => setShowNotificationModal(!showNotificationModal)}
         className="fixed bottom-6 right-6 bg-gradient-to-r from-blue-500 to-purple-600 text-white p-4 rounded-full shadow-2xl hover:shadow-3xl hover:scale-110 transform transition-all duration-300 z-40 group"
         title="Send Notifications"
       >
-        {showNotificationIframe ? (
+        {showNotificationModal ? (
           <XMarkIcon className="h-6 w-6" />
         ) : (
           <BellIcon className="h-6 w-6 animate-pulse" />
@@ -226,38 +259,96 @@ const AdminDashboard = () => {
         </span>
       </button>
 
-      {/* Notification Iframe Modal */}
-      {showNotificationIframe && (
+      {/* Notification Modal - Built-in Form */}
+      {showNotificationModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div 
-            className="bg-white dark:bg-gray-800 w-full max-w-6xl h-[90vh] flex flex-col shadow-2xl"
+            className="bg-white dark:bg-gray-800 w-full max-w-2xl shadow-2xl rounded-lg"
             style={{ borderRadius: '8px' }}
           >
             {/* Header */}
-            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
               <div className="flex items-center space-x-3">
                 <BellIcon className="h-6 w-6 text-blue-600" />
                 <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                  Send Notifications
+                  Send Notification
                 </h3>
               </div>
               <button
-                onClick={() => setShowNotificationIframe(false)}
+                onClick={() => setShowNotificationModal(false)}
                 className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full"
               >
                 <XMarkIcon className="h-6 w-6" />
               </button>
             </div>
 
-            {/* Iframe */}
-            <div className="flex-1 overflow-hidden" style={{ borderRadius: '0 0 8px 8px' }}>
-              <iframe
-                src="https://nssvu.netlify.app/"
-                className="w-full h-full border-0"
-                title="NSS Notification Portal"
-                allow="clipboard-write"
-              />
-            </div>
+            {/* Form */}
+            <form onSubmit={handleSendNotification} className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                  Notification Title
+                </label>
+                <input
+                  type="text"
+                  value={notificationForm.title}
+                  onChange={(e) => setNotificationForm({...notificationForm, title: e.target.value})}
+                  placeholder="e.g., New Event Available"
+                  className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white"
+                  disabled={sendingNotification}
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                  Message
+                </label>
+                <textarea
+                  value={notificationForm.message}
+                  onChange={(e) => setNotificationForm({...notificationForm, message: e.target.value})}
+                  placeholder="Enter your notification message here"
+                  rows="4"
+                  className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white"
+                  disabled={sendingNotification}
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                  Send To
+                </label>
+                <select
+                  value={notificationForm.targetRole}
+                  onChange={(e) => setNotificationForm({...notificationForm, targetRole: e.target.value})}
+                  className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white"
+                  disabled={sendingNotification}
+                >
+                  <option value="all">All Users</option>
+                  <option value="student">Students Only</option>
+                  <option value="faculty">Faculty Only</option>
+                  <option value="admin">Admins Only</option>
+                </select>
+              </div>
+
+              <div className="flex gap-3 justify-end pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowNotificationModal(false)}
+                  className="px-4 py-2 text-gray-700 dark:text-gray-200 bg-gray-200 dark:bg-gray-700 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+                  disabled={sendingNotification}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+                  disabled={sendingNotification}
+                >
+                  {sendingNotification ? 'Sending...' : 'Send Notification'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

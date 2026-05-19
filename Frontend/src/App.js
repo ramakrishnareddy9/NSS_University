@@ -81,7 +81,7 @@ function AppContent() {
             <Route
               path="/admin/events"
               element={
-                <PrivateRoute roles={['admin']}>
+                <PrivateRoute roles={['admin', 'faculty']}>
                   <AdminEvents />
                 </PrivateRoute>
               }
@@ -89,7 +89,7 @@ function AppContent() {
             <Route
               path="/admin/participations"
               element={
-                <PrivateRoute roles={['admin']}>
+                <PrivateRoute roles={['admin', 'faculty']}>
                   <AdminParticipations />
                 </PrivateRoute>
               }
@@ -227,8 +227,15 @@ function AppContent() {
               }
             />
 
-            {/* Public Leaderboard */}
-            <Route path="/leaderboard" element={<Leaderboard />} />
+            {/* Authenticated Leaderboard */}
+            <Route
+              path="/leaderboard"
+              element={
+                <PrivateRoute roles={['student', 'faculty', 'admin']}>
+                  <Leaderboard />
+                </PrivateRoute>
+              }
+            />
       </Routes>
       <Toaster position="top-right" />
     </div>

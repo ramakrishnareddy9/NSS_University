@@ -76,17 +76,41 @@ const eventSchema = new mongoose.Schema({
     }
   },
   certificate: {
-    type: mongoose.Schema.Types.Mixed,
-    default: () => ({
-      templateUrl: null,
-      templatePublicId: null,
-      fields: {
-        name: { x: 0, y: 0, fontSize: 36, color: '#000000', fontFamily: 'Arial' },
-        eventName: { x: 0, y: 0, fontSize: 28, color: '#000000', fontFamily: 'Arial' },
-        date: { x: 0, y: 0, fontSize: 24, color: '#000000', fontFamily: 'Arial' }
+    templateUrl: {
+      type: String,
+      default: null
+    },
+    templatePublicId: {
+      type: String,
+      default: null
+    },
+    fields: {
+      name: {
+        x: { type: Number, default: 0 },
+        y: { type: Number, default: 0 },
+        fontSize: { type: Number, default: 36 },
+        color: { type: String, default: '#000000' },
+        fontFamily: { type: String, default: 'Arial' }
       },
-      autoSend: true
-    })
+      eventName: {
+        x: { type: Number, default: 0 },
+        y: { type: Number, default: 0 },
+        fontSize: { type: Number, default: 28 },
+        color: { type: String, default: '#000000' },
+        fontFamily: { type: String, default: 'Arial' }
+      },
+      date: {
+        x: { type: Number, default: 0 },
+        y: { type: Number, default: 0 },
+        fontSize: { type: Number, default: 24 },
+        color: { type: String, default: '#000000' },
+        fontFamily: { type: String, default: 'Arial' }
+      }
+    },
+    autoSend: {
+      type: Boolean,
+      default: true
+    }
   },
   certificatesSent: { type: Boolean, default: false },
   notificationsSent: { type: Boolean, default: false },

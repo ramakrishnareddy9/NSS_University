@@ -12,6 +12,7 @@ function getPagination(req, { defaultLimit = 20, maxLimit = 100 } = {}) {
 
 function buildPagedResponse(data, total, page, limit) {
   return {
+    success: true,
     data,
     total,
     page,
