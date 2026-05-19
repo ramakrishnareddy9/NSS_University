@@ -13,6 +13,8 @@ const { auth, authorize } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
 const { analyzeStudentReport, generateConsolidatedReport, generateEventSummary } = require('../services/geminiService');
 const { resolveAcademicYearContext } = require('../utils/academicYear');
+const redis = require('../config/redis');
+const redis = require('../config/redis');
 
 function addWrappedText(doc, text, startY, options = {}) {
   const {
@@ -72,10 +74,10 @@ router.get('/event/:id', [auth, authorize('admin', 'faculty'), validateObjectId(
       return res.status(404).json({ message: 'Event not found' });
     }
 
-    const participations = await Participation.find({ event: event._id })
+    const participations = await Participation.find({ event: event._id, isDeleted: { $ne: true } })
       .populate('student', 'name email studentId department year');
 
-    const contributions = await Contribution.find({ event: event._id })
+    const contributions = await Contribution.find({ event: event._id, isDeleted: { $ne: true } })
       .populate('student', 'name email studentId');
 
     // Generate PDF
@@ -277,6 +279,7 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
     const { rangeStart, rangeEnd, label } = selectedRange;
 
     const events = await Event.find({
+      isDeleted: { $ne: true },
       $or: [
         { academicYear: label },
         { startDate: { $gte: rangeStart, $lte: rangeEnd } }
@@ -284,11 +287,13 @@ router.get('/annual-summary', [auth, authorize('admin')], async (req, res) => {
     });
 
     const participations = await Participation.find({
-      createdAt: { $gte: rangeStart, $lte: rangeEnd }
+      createdAt: { $gte: rangeStart, $lte: rangeEnd },
+      isDeleted: { $ne: true }
     }).populate('student', 'name email studentId department year');
 
     const contributions = await Contribution.find({
-      submittedAt: { $gte: rangeStart, $lte: rangeEnd }
+      submittedAt: { $gte: rangeStart, $lte: rangeEnd },
+      isDeleted: { $ne: true }
     }).populate('student', 'name email studentId');
 
     // Get all students with their total hours
@@ -573,6 +578,14 @@ router.post('/student/submit', [auth, authorize('student'), upload.array('files'
       })
       .catch(err => console.error('AI analysis failed:', err));
 
+    // Invalidate caches (best-effort)
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after report submit:', cacheErr.message);
+    }
+
     res.status(201).json({
       message: 'Report submitted successfully. AI analysis in progress.',
       report
@@ -591,7 +604,7 @@ router.post('/student/submit', [auth, authorize('student'), upload.array('files'
 // @access  Private (Student)
 router.get('/student/my-reports', auth, async (req, res) => {
   try {
-    const reports = await Report.find({ student: req.user.id })
+    const reports = await Report.find({ student: req.user.id, isDeleted: { $ne: true } })
       .populate('event', 'title startDate endDate location')
       .sort({ createdAt: -1 });
 
@@ -615,6 +628,7 @@ router.get('/admin/all', [auth, authorize('admin', 'faculty')], async (req, res)
       query.academicYear = (await resolveAcademicYearContext(academicYear)).label;
     }
     if (status) query.status = status;
+    query.isDeleted = { $ne: true };
 
     const reports = await Report.find(query)
       .populate('student', 'name email studentId department')
@@ -685,7 +699,8 @@ router.post('/admin/generate-naac', [auth, authorize('admin')], async (req, res)
     // Fetch all approved reports for the academic year
     const reports = await Report.find({
       academicYear: resolvedAcademicYear,
-      status: { $in: ['submitted', 'reviewed', 'approved'] }
+      status: { $in: ['submitted', 'reviewed', 'approved'] },
+      isDeleted: { $ne: true }
     })
       .populate('student', 'name email studentId department')
       .populate('event', 'title startDate endDate location category eventType');
@@ -727,7 +742,8 @@ router.post('/admin/generate-ugc', [auth, authorize('admin')], async (req, res) 
 
     const reports = await Report.find({
       academicYear: resolvedAcademicYear,
-      status: { $in: ['submitted', 'reviewed', 'approved'] }
+      status: { $in: ['submitted', 'reviewed', 'approved'] },
+      isDeleted: { $ne: true }
     })
       .populate('student', 'name email studentId department')
       .populate('event', 'title startDate endDate location category eventType');
@@ -766,7 +782,8 @@ router.post('/admin/event-summary/:eventId', [auth, authorize('admin', 'faculty'
 
     const reports = await Report.find({
       event: req.params.eventId,
-      status: { $in: ['submitted', 'reviewed', 'approved'] }
+      status: { $in: ['submitted', 'reviewed', 'approved'] },
+      isDeleted: { $ne: true }
     }).populate('student', 'name email');
 
     if (reports.length === 0) {
@@ -786,6 +803,13 @@ router.post('/admin/event-summary/:eventId', [auth, authorize('admin', 'faculty'
       publicId: event.summaryReport?.publicId || null
     };
     await event.save();
+
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after event summary save:', cacheErr.message);
+    }
 
     res.json({
       message: 'Event summary generated successfully',
@@ -932,7 +956,8 @@ router.post('/admin/event-summary/:eventId/pdf', [auth, authorize('admin', 'facu
 
     const reports = await Report.find({
       event: req.params.eventId,
-      status: { $in: ['submitted', 'reviewed', 'approved'] }
+      status: { $in: ['submitted', 'reviewed', 'approved'] },
+      isDeleted: { $ne: true }
     })
       .populate('student', 'name email studentId');
 
@@ -998,6 +1023,13 @@ router.post('/admin/event-summary/:eventId/pdf', [auth, authorize('admin', 'facu
     };
     await event.save();
 
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after event summary PDF save:', cacheErr.message);
+    }
+
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="event-summary-${event._id}.pdf"`);
     res.setHeader('X-Cloudinary-Url', uploadResult.secure_url);
@@ -1026,7 +1058,8 @@ router.post('/admin/consolidated-pdf', [auth, authorize('admin')], async (req, r
 
     const reports = await Report.find({
       academicYear: resolvedAcademicYear,
-      status: { $in: ['submitted', 'reviewed', 'approved'] }
+      status: { $in: ['submitted', 'reviewed', 'approved'] },
+      isDeleted: { $ne: true }
     })
       .populate('student', 'name studentId department')
       .populate('event', 'title startDate endDate location eventType category');
@@ -1145,6 +1178,13 @@ router.put('/admin/review/:reportId', [auth, authorize('admin', 'faculty')], asy
       return res.status(404).json({ message: 'Report not found' });
     }
 
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after report review:', cacheErr.message);
+    }
+
     res.json({
       message: `Report ${status} successfully`,
       report
@@ -1171,7 +1211,8 @@ router.post('/admin/generate-naac-preview', [auth, authorize('admin')], async (r
     // Fetch all approved reports for the academic year
     const reports = await Report.find({
       academicYear: resolvedAcademicYear,
-      status: { $in: ['submitted', 'reviewed', 'approved'] }
+      status: { $in: ['submitted', 'reviewed', 'approved'] },
+      isDeleted: { $ne: true }
     })
       .populate('student', 'name email studentId department')
       .populate('event', 'title startDate endDate location eventType');
@@ -1216,7 +1257,8 @@ router.put('/admin/save-naac-draft', [auth, authorize('admin')], async (req, res
     const reports = await Report.updateMany(
       {
         academicYear: resolvedAcademicYear,
-        status: { $in: ['submitted', 'reviewed', 'approved'] }
+        status: { $in: ['submitted', 'reviewed', 'approved'] },
+        isDeleted: { $ne: true }
       },
       {
         $set: {
@@ -1231,6 +1273,13 @@ router.put('/admin/save-naac-draft', [auth, authorize('admin')], async (req, res
     );
 
     console.log(`✏️ Saved NAAC draft edits for ${resolvedAcademicYear}. Updated ${reports.modifiedCount} reports.`);
+
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after save-naac-draft:', cacheErr.message);
+    }
 
     res.json({
       message: 'NAAC draft saved successfully',
@@ -1264,7 +1313,8 @@ router.post('/admin/generate-naac-pdf', [auth, authorize('admin')], async (req, 
     // Fetch all approved reports
     const reports = await Report.find({
       academicYear: resolvedAcademicYear,
-      status: { $in: ['submitted', 'reviewed', 'approved'] }
+      status: { $in: ['submitted', 'reviewed', 'approved'] },
+      isDeleted: { $ne: true }
     })
       .populate('student', 'name email studentId department')
       .populate('event', 'title startDate endDate location eventType');
@@ -1326,6 +1376,13 @@ router.post('/admin/generate-naac-pdf', [auth, authorize('admin')], async (req, 
     );
 
     console.log(`✅ NAAC PDF generated and uploaded: ${uploadResult.secure_url}`);
+
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after generate-naac-pdf:', cacheErr.message);
+    }
 
     res.json({
       message: 'NAAC PDF generated successfully',

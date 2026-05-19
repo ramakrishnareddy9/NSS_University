@@ -7,6 +7,7 @@ const { auth, authorize } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
 const { getPagination, buildPagedResponse } = require('../utils/pagination');
 const { sendContributionVerified } = require('../utils/notifications');
+const redis = require('../config/redis');
 
 const router = express.Router();
 
@@ -46,6 +47,11 @@ router.get('/', auth, async (req, res) => {
     // Filter by verification status
     if (req.query.isVerified !== undefined) {
       query.isVerified = req.query.isVerified === 'true';
+    }
+
+    // Exclude soft-deleted contributions unless admin requests them
+    if (!(req.query.includeDeleted === 'true' && (req.user.role === 'admin' || req.user.role === 'faculty'))) {
+      query.isDeleted = { $ne: true };
     }
 
     const { page, limit, skip } = getPagination(req);
@@ -94,6 +100,10 @@ router.post('/', [
     const participation = await Participation.findById(participationId)
       .populate('event');
 
+    if (!participation || participation.isDeleted) {
+      return res.status(404).json({ success: false, message: 'Participation not found' });
+    }
+
     if (!participation) {
       return res.status(404).json({ success: false, message: 'Participation not found' });
     }
@@ -107,7 +117,7 @@ router.post('/', [
     }
 
     // Check if contribution already exists
-    const existingContribution = await Contribution.findOne({ participation: participationId });
+    const existingContribution = await Contribution.findOne({ participation: participationId, isDeleted: { $ne: true } });
     if (existingContribution) {
       return res.status(400).json({ success: false, message: 'Contribution already submitted for this event' });
     }
@@ -142,6 +152,14 @@ router.post('/', [
     await contribution.populate('event', 'title eventType');
     await contribution.populate('participation');
 
+    // Invalidate caches (best-effort)
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after contribution submit:', cacheErr.message);
+    }
+
     res.status(201).json({ success: true, data: contribution });
   } catch (error) {
     console.error('Submit contribution error:', error);
@@ -156,7 +174,7 @@ router.put('/:id/verify', [auth, authorize('admin', 'faculty'), validateObjectId
   try {
     const contribution = await Contribution.findById(req.params.id);
 
-    if (!contribution) {
+    if (!contribution || contribution.isDeleted) {
       return res.status(404).json({ success: false, message: 'Contribution not found' });
     }
 
@@ -175,6 +193,14 @@ router.put('/:id/verify', [auth, authorize('admin', 'faculty'), validateObjectId
       await sendContributionVerified(contribution.student, contribution);
     } catch (error) {
       console.error('Failed to send contribution verification email:', error);
+    }
+
+    // Invalidate caches (best-effort)
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after contribution verify:', cacheErr.message);
     }
 
     res.json({ success: true, data: contribution });

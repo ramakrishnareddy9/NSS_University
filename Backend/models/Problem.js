@@ -104,6 +104,12 @@ const problemSchema = new mongoose.Schema({
     type: Number,
     default: 0
   }
+  ,
+  isDeleted: {
+    type: Boolean,
+    default: false,
+    index: true
+  }
 }, {
   timestamps: true
 });
@@ -143,6 +149,7 @@ problemSchema.statics.getVisibleProblems = function(userId, userRole) {
   } else {
     // Students see only their own or public approved ones
     return this.find({
+      isDeleted: { $ne: true },
       $or: [
         { reportedBy: userId },
         { visibility: 'public', status: 'approved' }

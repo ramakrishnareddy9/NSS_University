@@ -26,13 +26,15 @@ if (cron) {
 
       const events = await Event.find({
         startDate: { $gte: tomorrow, $lt: dayAfterTomorrow },
-        status: { $in: ['published', 'ongoing'] }
+        status: { $in: ['published', 'ongoing'] },
+        isDeleted: { $ne: true }
       });
 
       for (const event of events) {
         const participations = await Participation.find({
           event: event._id,
-          status: { $in: ['approved', 'attended'] }
+          status: { $in: ['approved', 'attended'] },
+          isDeleted: { $ne: true }
         }).populate('student', 'name email');
 
         for (const participation of participations) {
@@ -63,9 +65,14 @@ router.post('/send-reminder', [auth, authorize('admin', 'faculty')], async (req,
       return res.status(404).json({ success: false, message: 'Event not found' });
     }
 
+    if (event.isDeleted) {
+      return res.status(404).json({ success: false, message: 'Event not found' });
+    }
+
     const participations = await Participation.find({
       event: eventId,
-      status: { $in: ['approved', 'attended'] }
+      status: { $in: ['approved', 'attended'] },
+      isDeleted: { $ne: true }
     }).populate('student', 'name email');
 
     const results = [];

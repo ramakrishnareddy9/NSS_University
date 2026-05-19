@@ -32,6 +32,8 @@ router.get('/', [auth, authorize('admin', 'faculty')], async (req, res) => {
     }
 
     const { page, limit, skip } = getPagination(req);
+    query.isDeleted = { $ne: true };
+
     const total = await User.countDocuments(query);
 
     const users = await User.find(query)
@@ -52,21 +54,22 @@ router.get('/', [auth, authorize('admin', 'faculty')], async (req, res) => {
 // @access  Private (Admin/Faculty)
 router.get('/stats', [auth, authorize('admin', 'faculty')], async (req, res) => {
   try {
-    const totalStudents = await User.countDocuments({ role: 'student' });
-    const totalFaculty = await User.countDocuments({ role: 'faculty' });
-    const totalEvents = await Event.countDocuments();
-    const totalParticipations = await Participation.countDocuments({});
-    const totalContributions = await Contribution.countDocuments({});
+    const activeFilter = { isDeleted: { $ne: true } };
+    const totalStudents = await User.countDocuments({ role: 'student', ...activeFilter });
+    const totalFaculty = await User.countDocuments({ role: 'faculty', ...activeFilter });
+    const totalEvents = await Event.countDocuments(activeFilter);
+    const totalParticipations = await Participation.countDocuments(activeFilter);
+    const totalContributions = await Contribution.countDocuments(activeFilter);
     
     // Calculate total volunteer hours from all students
     const totalVolunteerHours = await User.aggregate([
-      { $match: { role: 'student' } },
+      { $match: { role: 'student', isDeleted: { $ne: true } } },
       { $group: { _id: null, total: { $sum: '$totalVolunteerHours' } } }
     ]);
     
     // Get pending problems count
     const Problem = require('../models/Problem');
-    const pendingProblems = await Problem.countDocuments({ status: 'pending' });
+    const pendingProblems = await Problem.countDocuments({ status: 'pending', isDeleted: { $ne: true } });
 
     const stats = {
       totalStudents,
@@ -106,10 +109,10 @@ router.get('/student/:id', auth, validateObjectId('id'), async (req, res) => {
       return res.status(404).json({ message: 'Student not found' });
     }
 
-    const participations = await Participation.find({ student: student._id })
+    const participations = await Participation.find({ student: student._id, isDeleted: { $ne: true } })
       .populate('event', 'title eventType startDate endDate');
 
-    const contributions = await Contribution.find({ student: student._id })
+    const contributions = await Contribution.find({ student: student._id, isDeleted: { $ne: true } })
       .populate('event', 'title eventType')
       .populate('participation');
 

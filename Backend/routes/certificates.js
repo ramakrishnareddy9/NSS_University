@@ -7,6 +7,7 @@ const Event = require('../models/Event');
 const Participation = require('../models/Participation');
 const { auth, authorize } = require('../middleware/auth');
 const { generateAndSendCertificates } = require('../utils/certificateGenerator');
+const redis = require('../config/redis');
 
 const router = express.Router();
 
@@ -36,7 +37,7 @@ router.post('/force-save-test/:eventId', [
     console.log('\n🧪 FORCE SAVE TEST for Event ID:', req.params.eventId);
     const event = await Event.findById(req.params.eventId);
     
-    if (!event) {
+    if (!event || event.isDeleted) {
       return res.status(404).json({ message: 'Event not found' });
     }
     
@@ -57,6 +58,13 @@ router.post('/force-save-test/:eventId', [
     // Re-fetch from DB to verify
     const refetched = await Event.findById(req.params.eventId);
     console.log('Refetched from DB:', refetched.certificate);
+
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after force-save-test:', cacheErr.message);
+    }
     
     res.json({
       message: 'Force save test completed',
@@ -135,7 +143,7 @@ router.post('/upload-template/:eventId', [
     
     const event = await Event.findById(req.params.eventId);
     
-    if (!event) {
+    if (!event || event.isDeleted) {
       console.log('❌ Event not found');
       return res.status(404).json({ message: 'Event not found' });
     }
@@ -212,6 +220,13 @@ router.post('/upload-template/:eventId', [
     // Verify by re-fetching
     const verifyEvent = await Event.findById(req.params.eventId);
     console.log('   Certificate object after save (verified):', JSON.stringify(verifyEvent.certificate, null, 2));
+
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after upload-template:', cacheErr.message);
+    }
     
     res.json({
       message: 'Certificate template uploaded successfully to Cloudinary',
@@ -235,7 +250,7 @@ router.put('/configure/:eventId', [
   try {
     const event = await Event.findById(req.params.eventId);
     
-    if (!event) {
+    if (!event || event.isDeleted) {
       return res.status(404).json({ message: 'Event not found' });
     }
     
@@ -274,6 +289,13 @@ router.put('/configure/:eventId', [
     console.log('💾 Saving certificate configuration:', JSON.stringify(event.certificate, null, 2));
     await event.save();
     console.log('✅ Configuration saved successfully');
+
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after configure:', cacheErr.message);
+    }
     
     res.json({
       message: 'Certificate configuration updated successfully',
@@ -323,7 +345,7 @@ router.post('/generate/:eventId', [
     
     const event = await Event.findById(req.params.eventId);
     
-    if (!event) {
+    if (!event || event.isDeleted) {
       console.log('❌ Event not found');
       return res.status(404).json({ message: 'Event not found' });
     }
@@ -354,6 +376,13 @@ router.post('/generate/:eventId', [
     
     // Generate and send certificates
     const result = await generateAndSendCertificates(req.params.eventId, io);
+
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after generate certificates:', cacheErr.message);
+    }
     
     res.json({
       message: 'Certificates generated and sent successfully',
@@ -388,7 +417,7 @@ router.post('/test-preview/:eventId', [
     
     const event = await Event.findById(req.params.eventId);
     
-    if (!event) {
+    if (!event || event.isDeleted) {
       console.log('❌ Event not found');
       return res.status(404).json({ message: 'Event not found' });
     }
@@ -504,9 +533,10 @@ router.get('/my-certificates', auth, async (req, res) => {
     
     const participations = await Participation.find({
       student: req.user.id,
-      'certificate.url': { $exists: true, $ne: null }
+      'certificate.url': { $exists: true, $ne: null },
+      isDeleted: { $ne: true }
     })
-    .populate('event', 'title startDate endDate location')
+    .populate({ path: 'event', match: { isDeleted: { $ne: true } }, select: 'title startDate endDate location' })
     .sort({ 'certificate.generatedAt': -1 });
     
     // Filter out participations where event might be null/deleted

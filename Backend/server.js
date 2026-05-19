@@ -127,6 +127,39 @@ const authRateLimiter = rateLimit({
 
 app.use('/api', apiRateLimiter);
 
+// Global Mongoose plugin to exclude soft-deleted documents by default.
+// To include deleted documents in a query, add `includeDeleted: true` to the query object.
+const softDeletePlugin = function (schema) {
+  function addNotDeleted(next) {
+    try {
+      const q = this.getQuery ? this.getQuery() : {};
+      if (q && Object.prototype.hasOwnProperty.call(q, 'includeDeleted')) {
+        delete q.includeDeleted;
+        return next();
+      }
+      if (!q || !Object.prototype.hasOwnProperty.call(q, 'isDeleted')) {
+        this.where({ isDeleted: { $ne: true } });
+      }
+    } catch (e) {
+      console.error('SoftDelete plugin error:', e);
+    }
+    return next();
+  }
+
+  schema.pre('find', addNotDeleted);
+  schema.pre('findOne', addNotDeleted);
+  schema.pre('countDocuments', addNotDeleted);
+  schema.pre('count', addNotDeleted);
+  schema.pre('findOneAndUpdate', addNotDeleted);
+  schema.pre('updateMany', addNotDeleted);
+};
+
+try {
+  mongoose.plugin(softDeletePlugin);
+} catch (e) {
+  console.error('Failed to apply mongoose softDeletePlugin:', e);
+}
+
 // Serve uploaded files statically (for local storage fallback)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -158,7 +191,6 @@ app.use('/api/problems', require('./routes/problemRoutes'));
 app.use('/api/period-config', require('./routes/periodConfig'));
 app.use('/api/academic-year-config', require('./routes/academicYearConfig'));
 app.use('/api/od-list', require('./routes/odList'));
-
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/nss-portal', {
   useNewUrlParser: true,
   useUnifiedTopology: true,

@@ -10,6 +10,7 @@ const appConfig = require('../config/appConfig');
 const AuditLog = require('../models/AuditLog');
 const { sendRegistrationConfirmation, sendApprovalNotification, sendWaitlistPromotionNotification } = require('../utils/notifications');
 const { getPagination, buildPagedResponse } = require('../utils/pagination');
+const redis = require('../config/redis');
 
 const router = express.Router();
 
@@ -62,6 +63,11 @@ router.get('/', auth, async (req, res) => {
 
     if (req.query.status) {
       query.status = req.query.status;
+    }
+
+    // Exclude soft-deleted participations from normal listings unless admin requests them
+    if (!(req.query.includeDeleted === 'true' && (req.user.role === 'admin' || req.user.role === 'faculty'))) {
+      query.isDeleted = { $ne: true };
     }
 
     const { page, limit, skip } = getPagination(req);
@@ -122,7 +128,8 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
         // Check if already registered (including waitlist)
         const existingParticipation = await Participation.findOne({
           student: req.user.id,
-          event: eventId
+          event: eventId,
+          isDeleted: { $ne: true }
         }).session(session);
 
         if (existingParticipation) {
@@ -222,6 +229,14 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
         : 'Successfully registered for the event'
     });
 
+    // Invalidate landing stats and leaderboard caches (best-effort)
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after registration:', cacheErr.message);
+    }
+
   } catch (error) {
     console.error('Register participation error:', error);
     if (error.code === 11000) {
@@ -238,7 +253,7 @@ router.put('/:id/approve', [auth, authorize('admin', 'faculty'), validateObjectI
   try {
     const participation = await Participation.findById(req.params.id);
 
-    if (!participation) {
+    if (!participation || participation.isDeleted) {
       return res.status(404).json({ message: 'Participation not found' });
     }
 
@@ -251,6 +266,14 @@ router.put('/:id/approve', [auth, authorize('admin', 'faculty'), validateObjectI
     participation.approvedBy = req.user.id;
 
     await participation.save();
+
+    // Invalidate caches (best-effort)
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after approval:', cacheErr.message);
+    }
 
     await participation.populate('student', 'name email studentId notificationPreferences');
     await participation.populate('event', 'title eventType startDate endDate location');
@@ -371,7 +394,7 @@ router.put('/:id/reject', [auth, authorize('admin', 'faculty'), validateObjectId
   try {
     const participation = await Participation.findById(req.params.id);
 
-    if (!participation) {
+    if (!participation || participation.isDeleted) {
       return res.status(404).json({ message: 'Participation not found' });
     }
 
@@ -401,6 +424,14 @@ router.put('/:id/reject', [auth, authorize('admin', 'faculty'), validateObjectId
 
     await participation.populate('student', 'name email studentId');
     await participation.populate('event', 'title eventType');
+
+    // Invalidate caches (best-effort)
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after rejection:', cacheErr.message);
+    }
 
     // Broadcast update
     try {
@@ -439,7 +470,7 @@ router.put('/:id/complete', [auth, authorize('admin', 'faculty'), validateObject
       .populate('student', 'totalVolunteerHours name email')
       .populate('event', 'startDate endDate title');
 
-    if (!participation) {
+    if (!participation || participation.isDeleted) {
       return res.status(404).json({ message: 'Participation not found' });
     }
 
@@ -522,6 +553,22 @@ router.put('/:id/complete', [auth, authorize('admin', 'faculty'), validateObject
       }
     }
 
+    // Invalidate caches (best-effort)
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after completion:', cacheErr.message);
+    }
+
+    // Invalidate caches (best-effort)
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after attendance change:', cacheErr.message);
+    }
+
     // Emit socket event
     try {
       const io = req.app.get('io');
@@ -567,8 +614,8 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
       .populate('event')
       .populate('student', 'name email totalVolunteerHours');
 
-    if (!participation) {
-      console.log('❌ Participation not found');
+    if (!participation || participation.isDeleted) {
+      console.log('❌ Participation not found or deleted');
       return res.status(404).json({ message: 'Participation not found' });
     }
 
@@ -770,7 +817,7 @@ router.delete('/:id', [auth, validateObjectId('id')], async (req, res) => {
       .populate('student', 'name email')
       .populate('event', 'title maxParticipants currentParticipants');
 
-    if (!participation) {
+    if (!participation || participation.isDeleted) {
       return res.status(404).json({ message: 'Participation not found' });
     }
 
@@ -836,6 +883,14 @@ router.delete('/:id', [auth, validateObjectId('id')], async (req, res) => {
       });
     } finally {
       session.endSession();
+    }
+
+    // Invalidate caches (best-effort)
+    try {
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after cancellation:', cacheErr.message);
     }
 
     // Send cancellation notification to the student if requested

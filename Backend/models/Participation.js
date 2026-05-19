@@ -74,6 +74,12 @@ const participationSchema = new mongoose.Schema({
   promotedAt: {
     type: Date
   }
+  ,
+  isDeleted: {
+    type: Boolean,
+    default: false,
+    index: true
+  }
 }, {
   timestamps: true
 });

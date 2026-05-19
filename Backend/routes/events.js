@@ -12,6 +12,7 @@ const { getPagination, buildPagedResponse } = require('../utils/pagination');
 const { resolveAcademicYearContext } = require('../utils/academicYear');
 
 const router = express.Router();
+const mongoose = require('mongoose');
 const allowedStudentStatuses = ['published', 'ongoing', 'completed'];
 
 async function notifyStudentsAboutEvent(event, req) {
@@ -124,37 +125,94 @@ router.get('/', auth, async (req, res) => {
       ];
     }
 
-    const { page, limit, skip } = getPagination(req);
-    const total = await Event.countDocuments(query);
+    // Exclude soft-deleted records from active queries unless explicitly requested by an admin
+    if (!(req.query.includeDeleted === 'true' && req.user.role === 'admin')) {
+      query.isDeleted = { $ne: true };
+    }
 
-    const events = await Event.find(query)
-      .populate('organizer', 'name email')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
+    // Support both traditional page-based pagination and cursor-based pagination
+    const requestedLimit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+    const cursor = req.query.cursor;
+
+    let events;
+    if (cursor) {
+      // Cursor-based pagination using ObjectId ordering (newest first)
+      try {
+        const cursorId = mongoose.Types.ObjectId(cursor);
+        query._id = { $lt: cursorId };
+      } catch (e) {
+        return res.status(400).json({ message: 'Invalid cursor' });
+      }
+
+      events = await Event.find(query)
+        .populate('organizer', 'name email')
+        .sort({ _id: -1 })
+        .limit(requestedLimit + 1); // fetch one extra to determine hasMore
+    } else {
+      // Fallback to page-based pagination for existing clients
+      const { page, limit, skip } = getPagination(req);
+      const total = await Event.countDocuments(query);
+
+      events = await Event.find(query)
+        .populate('organizer', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit);
+
+      // keep old response format
+      const totalForPage = total;
+      const data = events.map(event => event.toObject());
+
+      let participationMap = new Map();
+      if (req.user.role === 'student' && events.length > 0) {
+        const participations = await Participation.find({
+          student: req.user.id,
+          event: { $in: events.map(event => event._id) }
+        }).select('event status');
+
+        participationMap = new Map(participations.map(participation => [
+          String(participation.event),
+          participation.status
+        ]));
+      }
+
+      const mapped = data.map(event => {
+        if (req.user.role === 'student') {
+          event.participationStatus = participationMap.get(String(event._id)) || null;
+        }
+        return event;
+      });
+
+      return res.json(buildPagedResponse(mapped, totalForPage, page, limit));
+    }
+
+    // At this point we're in cursor mode
+    const hasMore = events.length > requestedLimit;
+    if (hasMore) events.pop(); // remove extra
+
+    const dataObjects = events.map(e => e.toObject());
 
     let participationMap = new Map();
     if (req.user.role === 'student' && events.length > 0) {
       const participations = await Participation.find({
         student: req.user.id,
-        event: { $in: events.map(event => event._id) }
+        event: { $in: events.map(event => event._id) },
+        isDeleted: { $ne: true }
       }).select('event status');
 
-      participationMap = new Map(participations.map(participation => [
-        String(participation.event),
-        participation.status
-      ]));
+      participationMap = new Map(participations.map(p => [String(p.event), p.status]));
     }
 
-    const data = events.map(event => {
-      const plain = event.toObject();
+    const mapped = dataObjects.map(event => {
       if (req.user.role === 'student') {
-        plain.participationStatus = participationMap.get(String(event._id)) || null;
+        event.participationStatus = participationMap.get(String(event._id)) || null;
       }
-      return plain;
+      return event;
     });
 
-    res.json(buildPagedResponse(data, total, page, limit));
+    const nextCursor = mapped.length > 0 ? String(mapped[mapped.length - 1]._id) : null;
+
+    res.json({ data: mapped, nextCursor, hasMore });
   } catch (error) {
     console.error('Get events error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -170,6 +228,7 @@ router.get('/:id', auth, validateObjectId('id'), async (req, res) => {
       .populate('organizer', 'name email')
       .populate({
         path: 'participations',
+        match: { isDeleted: { $ne: true } },
         populate: {
           path: 'student',
           select: 'name email studentId'
@@ -182,7 +241,7 @@ router.get('/:id', auth, validateObjectId('id'), async (req, res) => {
 
     const plain = event.toObject();
     if (req.user.role === 'student') {
-      const participation = await Participation.findOne({ student: req.user.id, event: event._id }).select('status');
+      const participation = await Participation.findOne({ student: req.user.id, event: event._id, isDeleted: { $ne: true } }).select('status');
       plain.participationStatus = participation ? participation.status : null;
     }
 
@@ -238,6 +297,15 @@ router.post('/', [
       await notifyStudentsAboutEvent(event, req);
     }
 
+    // Invalidate caches (best-effort)
+    try {
+      const redis = require('../config/redis');
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after event create:', cacheErr.message);
+    }
+
     res.status(201).json(event);
   } catch (error) {
     console.error('Create event error:', error);
@@ -264,6 +332,14 @@ router.post('/:id/publish', auth, validateObjectId('id'), async (req, res) => {
     await event.populate('organizer', 'name email');
 
     await notifyStudentsAboutEvent(event, req);
+
+    try {
+      const redis = require('../config/redis');
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after publish:', cacheErr.message);
+    }
 
     res.json(event);
   } catch (error) {
@@ -295,6 +371,15 @@ router.put('/:id', [auth, authorize('admin', 'faculty'), validateObjectId('id')]
 
     await event.save();
     await event.populate('organizer', 'name email');
+
+    try {
+      const redis = require('../config/redis');
+      await redis.del('landing:stats');
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after event update:', cacheErr.message);
+    }
+
     res.json(event);
   } catch (error) {
     console.error('Update event error:', error);
@@ -306,117 +391,142 @@ router.put('/:id', [auth, authorize('admin', 'faculty'), validateObjectId('id')]
 // @desc    Cancel or delete event (soft cancel or hard delete based on status)
 // @access  Private (Admin only)
 router.delete('/:id', [auth, authorize('admin'), validateObjectId('id')], async (req, res) => {
+  const session = await mongoose.startSession();
+  let registeredStudents = [];
   try {
-    const event = await Event.findById(req.params.id);
-    if (!event) {
-      return res.status(404).json({ message: 'Event not found' });
-    }
+    let transactionResult = null;
+    await session.withTransaction(async () => {
+      const event = await Event.findById(req.params.id).session(session);
+      if (!event) {
+        const err = new Error('Event not found');
+        err.code = 'NOT_FOUND';
+        throw err;
+      }
 
-    const { cancellationReason, hardDelete } = req.body;
+      const { cancellationReason, hardDelete } = req.body;
 
-    // If event has registered participants and hasn't started, mark as cancelled and notify
-    if (event.status === 'draft' || event.status === 'published') {
-      // Get all registered students (not waitlisted) for notifications
-      const Participation = require('../models/Participation');
-      const registeredParticipations = await Participation.find({
-        event: event._id,
-        waitlistStatus: { $ne: 'waitlisted' },
-        status: { $ne: 'rejected', $ne: 'cancelled' }
-      }).populate('student', 'name email notificationPreferences');
+      // If event has registered participants and hasn't started, mark as cancelled and notify
+      if (event.status === 'draft' || event.status === 'published') {
+        const Participation = require('../models/Participation');
+        const registeredParticipations = await Participation.find({
+          event: event._id,
+          waitlistStatus: { $ne: 'waitlisted' },
+          status: { $nin: ['rejected', 'cancelled'] }
+        }).populate('student', 'name email notificationPreferences').session(session);
 
-      const registeredStudents = registeredParticipations.map(p => p.student);
-      
-      // Filter students who want event cancellation emails
+        registeredStudents = registeredParticipations.map(p => p.student);
+
+        // Mark event as cancelled
+        event.status = 'cancelled';
+        event.cancelledAt = new Date();
+        event.cancelledBy = req.user.id;
+        event.cancellationReason = cancellationReason || 'No reason provided';
+        await event.save({ session });
+
+        // Mark all participations as cancelled
+        await Participation.updateMany(
+          { event: event._id, status: { $nin: ['rejected', 'cancelled'] } },
+          { $set: { status: 'cancelled', attendance: false } },
+          { session }
+        );
+
+        transactionResult = { type: 'cancel', event: event.toObject(), notificationsSent: registeredStudents.length };
+        return;
+      }
+
+      // For completed or ongoing events, require hardDelete=true to proceed
+      if (hardDelete !== true && (event.status === 'ongoing' || event.status === 'completed')) {
+        const err = new Error('CANNOT_DELETE_STARTED_OR_COMPLETED');
+        err.code = 'BAD_REQUEST';
+        throw err;
+      }
+
+      // Perform cascaded soft-delete for event and related documents
+      try {
+        const Contribution = require('../models/Contribution');
+        const Problem = require('../models/Problem');
+
+        await Participation.updateMany({ event: event._id }, { $set: { isDeleted: true } }, { session });
+        await Contribution.updateMany({ event: event._id }, { $set: { isDeleted: true } }, { session });
+        await Problem.updateMany({ eventId: event._id }, { $set: { isDeleted: true } }, { session });
+        await Notification.updateMany({ event: event._id }, { $set: { isDeleted: true } }, { session });
+
+        event.isDeleted = true;
+        await event.save({ session });
+        transactionResult = { type: 'softDelete', eventId: event._id };
+      } catch (cleanupErr) {
+        console.error('Error during cascaded soft-delete in transaction:', cleanupErr);
+        throw cleanupErr;
+      }
+    });
+
+    // Transaction completed
+    if (transactionResult && transactionResult.type === 'cancel') {
+      // After transaction: notify students and broadcast
       const studentsToNotify = registeredStudents.filter(student => {
-        if (!student.notificationPreferences?.emailNotifications) {
-          return true; // Default to true if preferences not set
-        }
+        if (!student.notificationPreferences?.emailNotifications) return true;
         return student.notificationPreferences.emailNotifications.eventCancelled !== false;
       });
 
-      // Mark event as cancelled
-      event.status = 'cancelled';
-      event.cancelledAt = new Date();
-      event.cancelledBy = req.user.id;
-      event.cancellationReason = cancellationReason || 'No reason provided';
-      await event.save();
-
-      // Mark all participations as cancelled
-      await Participation.updateMany(
-        { event: event._id, status: { $ne: 'rejected', $ne: 'cancelled' } },
-        { status: 'cancelled', attendance: false }
-      );
-
-      // Send cancellation emails asynchronously
       if (studentsToNotify.length > 0) {
         const { sendEventCancellationNotification } = require('../utils/notifications');
         try {
-          const emailResult = await sendEventCancellationNotification(event, studentsToNotify, cancellationReason);
+          const emailResult = await sendEventCancellationNotification(transactionResult.event, studentsToNotify, req.body.cancellationReason);
           console.log(`📧 Event cancellation notifications sent: ${emailResult.notificationsSent}/${emailResult.total}`);
-          if (emailResult.failedEmails.length > 0) {
-            console.warn(`⚠️ Failed to send emails to: ${emailResult.failedEmails.join(', ')}`);
-          }
         } catch (error) {
           console.error('Error sending cancellation notifications:', error);
         }
-      } else {
-        console.log('📧 No students opted in for event cancellation notifications');
       }
 
-      // Broadcast cancellation to connected users
       try {
         const io = req.app.get('io');
         if (io) {
           io.emit('event-cancelled', {
             type: 'event-cancelled',
-            message: `Event "${event.title}" has been cancelled.`,
+            message: `Event "${transactionResult.event.title}" has been cancelled.`,
             event: {
-              id: event._id,
-              title: event.title,
-              cancellationReason: event.cancellationReason
+              id: transactionResult.event._id,
+              title: transactionResult.event.title,
+              cancellationReason: transactionResult.event.cancellationReason
             },
             timestamp: new Date()
           });
-          console.log(`🔔 Event cancellation broadcast sent for: ${event.title}`);
         }
       } catch (socketError) {
         console.error('Socket emission failed for event cancellation:', socketError);
       }
 
-      return res.json({ 
-        message: 'Event cancelled successfully and notifications sent',
-        event,
-        notificationsSent: registeredStudents.length
-      });
+      try {
+        const redis = require('../config/redis');
+        await redis.del('landing:stats');
+        await redis.purgePattern('leaderboard:*');
+      } catch (cacheErr) {
+        console.warn('Cache invalidation failed after event cancellation:', cacheErr.message);
+      }
+
+      return res.json({ message: 'Event cancelled successfully and notifications sent', event: transactionResult.event, notificationsSent: transactionResult.notificationsSent });
     }
 
-    // For completed or ongoing events, perform hard delete only if explicitly requested
-    if (hardDelete !== true && (event.status === 'ongoing' || event.status === 'completed')) {
-      return res.status(400).json({ 
-        message: 'Cannot cancel started or completed events. Use hardDelete: true to force delete.',
-        currentStatus: event.status
-      });
+    if (transactionResult && transactionResult.type === 'softDelete') {
+      try {
+        const redis = require('../config/redis');
+        await redis.del('landing:stats');
+        await redis.purgePattern('leaderboard:*');
+      } catch (cacheErr) {
+        console.warn('Cache invalidation failed after event soft-delete:', cacheErr.message);
+      }
+
+      return res.json({ message: 'Event soft-deleted (cascaded)', eventId: transactionResult.eventId });
     }
-
-    // Hard delete: remove all related records
-    await Participation.deleteMany({ event: event._id });
-
-    try {
-      const Contribution = require('../models/Contribution');
-      const Problem = require('../models/Problem');
-
-      await Contribution.deleteMany({ event: event._id });
-      await Problem.deleteMany({ eventId: event._id });
-      await Notification.deleteMany({ event: event._id });
-    } catch (cleanupErr) {
-      console.error('Error cleaning up related records for event deletion:', cleanupErr);
-    }
-
-    await Event.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Event permanently deleted' });
+    // No result? respond generic
+    return res.json({ message: 'Operation completed' });
   } catch (error) {
+    if (error.code === 'NOT_FOUND') return res.status(404).json({ message: 'Event not found' });
+    if (error.code === 'BAD_REQUEST') return res.status(400).json({ message: 'Cannot delete started or completed events without hardDelete: true' });
     console.error('Delete event error:', error);
-    res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  } finally {
+    session.endSession();
   }
 });
 

@@ -2,6 +2,7 @@ const express = require('express');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 const { auth } = require('../middleware/auth');
+const redis = require('../config/redis');
 
 const router = express.Router();
 
@@ -20,6 +21,7 @@ router.get('/', auth, async (req, res) => {
     if (type) {
       query.type = type;
     }
+    query.isDeleted = { $ne: true };
 
     const total = await Notification.countDocuments(query);
     const notifications = await Notification.find(query)
@@ -30,7 +32,8 @@ router.get('/', auth, async (req, res) => {
 
     const unreadCount = await Notification.countDocuments({ 
       user: req.user._id, 
-      read: false 
+      read: false,
+      isDeleted: { $ne: true }
     });
 
     res.json({
@@ -56,7 +59,8 @@ router.get('/counts', auth, async (req, res) => {
       {
         $match: {
           user: req.user._id,
-          read: false
+          read: false,
+          isDeleted: { $ne: true }
         }
       },
       {
@@ -69,7 +73,8 @@ router.get('/counts', auth, async (req, res) => {
     
     const total = await Notification.countDocuments({
       user: req.user.id,
-      read: false
+      read: false,
+      isDeleted: { $ne: true }
     });
     
     const countMap = {};
@@ -94,7 +99,8 @@ router.put('/:id/read', auth, async (req, res) => {
   try {
     const notification = await Notification.findOne({
       _id: req.params.id,
-      user: req.user._id
+      user: req.user._id,
+      isDeleted: { $ne: true }
     });
 
     if (!notification) {
@@ -104,6 +110,12 @@ router.put('/:id/read', auth, async (req, res) => {
     notification.read = true;
     notification.readAt = new Date();
     await notification.save();
+
+    try {
+      await redis.del(`notifications:${req.user._id}:counts`);
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after marking notification read:', cacheErr.message);
+    }
 
     res.json(notification);
   } catch (error) {
@@ -118,9 +130,15 @@ router.put('/:id/read', auth, async (req, res) => {
 router.put('/read-all', auth, async (req, res) => {
   try {
     const result = await Notification.updateMany(
-      { user: req.user._id, read: false },
+      { user: req.user._id, read: false, isDeleted: { $ne: true } },
       { read: true, readAt: new Date() }
     );
+
+    try {
+      await redis.del(`notifications:${req.user._id}:counts`);
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after mark-all-read:', cacheErr.message);
+    }
 
     res.json({ 
       message: 'All notifications marked as read',
@@ -139,11 +157,18 @@ router.delete('/:id', auth, async (req, res) => {
   try {
     const notification = await Notification.findOneAndDelete({
       _id: req.params.id,
-      user: req.user._id
+      user: req.user._id,
+      isDeleted: { $ne: true }
     });
 
     if (!notification) {
       return res.status(404).json({ message: 'Notification not found' });
+    }
+
+    try {
+      await redis.del(`notifications:${req.user._id}:counts`);
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after notification delete:', cacheErr.message);
     }
 
     res.json({ message: 'Notification deleted' });
@@ -194,6 +219,12 @@ router.put('/preferences', auth, async (req, res) => {
       { $set: updates },
       { new: true }
     ).select('notificationPreferences');
+
+    try {
+      await redis.del(`notifications:${req.user._id}:preferences`);
+    } catch (cacheErr) {
+      console.warn('Cache invalidation failed after preference update:', cacheErr.message);
+    }
     
     res.json({
       message: 'Notification preferences updated',

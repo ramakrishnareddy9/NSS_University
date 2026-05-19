@@ -9,6 +9,7 @@ const { sendEmail, sendNewEventNotification } = require('../utils/notifications'
 const AuditLog = require('../models/AuditLog');
 const appConfig = require('../config/appConfig');
 const { getPagination, buildPagedResponse } = require('../utils/pagination');
+const redis = require('../config/redis');
 
 // Points configuration
 const POINTS_CONFIG = {
@@ -81,6 +82,13 @@ exports.submitProblem = async (req, res) => {
     // Populate reporter details
     await problem.populate('reportedBy', 'name email studentId');
 
+    try {
+      await redis.purgePattern('leaderboard:*');
+      await redis.del('landing:stats');
+    } catch (cacheErr) {
+      console.warn('Redis purge failed after submitProblem:', cacheErr.message);
+    }
+
     res.status(201).json({
       success: true,
       message: 'Problem reported successfully. Waiting for admin approval.',
@@ -135,6 +143,8 @@ exports.getProblems = async (req, res) => {
     if (severity) query.severity = severity;
 
     const { page, limit, skip } = getPagination(req);
+    query.isDeleted = { $ne: true };
+
     const total = await Problem.countDocuments(query);
 
     const problems = await Problem.find(query)
@@ -211,7 +221,7 @@ exports.getProblemById = async (req, res) => {
  */
 exports.getMyReports = async (req, res) => {
   try {
-    const problems = await Problem.find({ reportedBy: req.user._id })
+    const problems = await Problem.find({ reportedBy: req.user._id, isDeleted: { $ne: true } })
       .populate('reviewedBy', 'name email')
       .populate('eventId', 'title date location')
       .sort({ createdAt: -1 });
@@ -374,6 +384,14 @@ exports.approveProblem = async (req, res) => {
       }
     }
 
+    // Purge caches related to leaderboard/landing since data changed
+    try {
+      await redis.purgePattern('leaderboard:*');
+      await redis.del('landing:stats');
+    } catch (cacheErr) {
+      console.warn('Redis purge failed after approveProblem:', cacheErr.message);
+    }
+
     const pointsToAward = problem.pointsAwarded;
 
     // Send notification to reporter
@@ -511,6 +529,13 @@ exports.rejectProblem = async (req, res) => {
       console.error('Error sending rejection email:', emailError);
     }
 
+    try {
+      await redis.purgePattern('leaderboard:*');
+      await redis.del('landing:stats');
+    } catch (cacheErr) {
+      console.warn('Redis purge failed after rejectProblem:', cacheErr.message);
+    }
+
     res.status(200).json({
       success: true,
       message: 'Problem rejected',
@@ -559,6 +584,13 @@ exports.resolveProblem = async (req, res) => {
     reporter.rewardPoints += POINTS_CONFIG.PROBLEM_RESOLVED;
     await reporter.save();
 
+    try {
+      await redis.purgePattern('leaderboard:*');
+      await redis.del('landing:stats');
+    } catch (cacheErr) {
+      console.warn('Redis purge failed after resolveProblem:', cacheErr.message);
+    }
+
     res.status(200).json({
       success: true,
       message: 'Problem marked as resolved',
@@ -584,32 +616,35 @@ exports.getLeaderboard = async (req, res) => {
   try {
     const { limit = 10, period = 'all' } = req.query;
 
+    const cacheKey = `leaderboard:period=${period}:limit=${limit}`;
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        return res.status(200).json(JSON.parse(cached));
+      }
+    } catch (cacheErr) {
+      console.warn('Redis read failed for leaderboard:', cacheErr.message);
+    }
+
     // Calculate date filter based on period
     let dateFilter = {};
     const now = new Date();
     
     if (period === 'month') {
-      // Start of current month
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
       dateFilter = { createdAt: { $gte: startOfMonth } };
     } else if (period === 'year') {
-      // Start of current calendar year
       const startOfYear = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
       dateFilter = { createdAt: { $gte: startOfYear } };
     }
-    // For 'all', no date filter is applied
 
-    // Build aggregation pipeline to count problems per user for the given period
     const matchStage = { reportedBy: { $exists: true } };
-    
-    // Apply date filter when provided
     if (Object.keys(dateFilter).length > 0) {
       matchStage.createdAt = dateFilter.createdAt;
     }
 
     const pipeline = [
-      { $match: matchStage },
-      // Count problems per user in this period
+      { $match: { ...matchStage, isDeleted: { $ne: true } } },
       { 
         $group: { 
           _id: '$reportedBy', 
@@ -619,7 +654,6 @@ exports.getLeaderboard = async (req, res) => {
           }
         } 
       },
-      // Lookup user details
       { 
         $lookup: {
           from: 'users',
@@ -629,9 +663,7 @@ exports.getLeaderboard = async (req, res) => {
         } 
       },
       { $unwind: '$user' },
-      // Only include students
       { $match: { 'user.role': 'student' } },
-      // Project anonymized data only
       { 
         $project: {
           _id: 1,
@@ -641,14 +673,12 @@ exports.getLeaderboard = async (req, res) => {
           badges: '$user.badges'
         } 
       },
-      // Sort by problems reported and score
       { $sort: { problemsInPeriod: -1, reportingScore: -1 } },
       { $limit: parseInt(limit) }
     ];
 
     const topReporters = await Problem.aggregate(pipeline);
 
-    // Add rank and anonymize user IDs
     const anonymizedLeaderboard = topReporters.map((reporter, index) => ({
       rank: index + 1,
       anonymousId: `reporter-${index + 1}`,
@@ -659,12 +689,20 @@ exports.getLeaderboard = async (req, res) => {
       period: period
     }));
 
-    res.status(200).json({
+    const response = {
       success: true,
       count: anonymizedLeaderboard.length,
       period: period,
       data: anonymizedLeaderboard
-    });
+    };
+
+    try {
+      await redis.setEx(cacheKey, 300, JSON.stringify(response));
+    } catch (cacheErr) {
+      console.warn('Redis write failed for leaderboard:', cacheErr.message);
+    }
+
+    res.status(200).json(response);
   } catch (error) {
     console.error('Error fetching leaderboard:', error);
     res.status(500).json({
@@ -703,7 +741,8 @@ async function checkAndAwardBadges(user) {
   
   const monthlyReports = await Problem.countDocuments({
     reportedBy: user._id,
-    createdAt: { $gte: startOfMonth }
+    createdAt: { $gte: startOfMonth },
+    isDeleted: { $ne: true }
   });
 
   if (monthlyReports >= 3 && !badges.includes('Active Reporter')) {
@@ -834,7 +873,7 @@ exports.getCategoryHeatmap = async (req, res) => {
     }
 
     const pipeline = [
-      { $match: matchStage },
+      { $match: { ...matchStage, isDeleted: { $ne: true } } },
       {
         $group: {
           _id: '$category',
@@ -944,6 +983,12 @@ exports.followUser = async (req, res) => {
       following: userId
     });
 
+    try {
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Redis purge failed after followUser:', cacheErr.message);
+    }
+
     res.status(201).json({
       success: true,
       message: 'Successfully followed user',
@@ -988,6 +1033,12 @@ exports.unfollowUser = async (req, res) => {
         success: false,
         message: 'Follow relationship not found'
       });
+    }
+
+    try {
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Redis purge failed after unfollowUser:', cacheErr.message);
     }
 
     res.status(200).json({
@@ -1081,6 +1132,12 @@ exports.upvoteProblem = async (req, res) => {
     problem.upvotes = (problem.upvotes || 0) + 1;
     await problem.save();
 
+    try {
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Redis purge failed after upvoteProblem:', cacheErr.message);
+    }
+
     res.status(201).json({
       success: true,
       message: 'Successfully upvoted problem',
@@ -1136,6 +1193,12 @@ exports.removeUpvote = async (req, res) => {
     if (problem) {
       problem.upvotes = Math.max(0, (problem.upvotes || 1) - 1);
       await problem.save();
+    }
+
+    try {
+      await redis.purgePattern('leaderboard:*');
+    } catch (cacheErr) {
+      console.warn('Redis purge failed after removeUpvote:', cacheErr.message);
     }
 
     res.status(200).json({

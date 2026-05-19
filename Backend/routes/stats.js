@@ -13,8 +13,8 @@ router.get('/landing', async (req, res) => {
     // Count total students (users with role 'student')
     const totalStudents = await User.countDocuments({ role: 'student' });
 
-    // Count total events
-    const totalEvents = await Event.countDocuments();
+    // Count total events (exclude soft-deleted)
+    const totalEvents = await Event.countDocuments({ isDeleted: { $ne: true } });
 
     // Count unique departments as a proxy for institutions (no 'college' field in user schema)
     const departments = await User.distinct('department', { role: 'student' });
@@ -36,7 +36,7 @@ router.get('/landing', async (req, res) => {
 
     const totalHours = Math.max(userTotalHours, participationTotalHours);
 
-    const participations = await Participation.countDocuments({ status: 'approved' });
+    const participations = await Participation.countDocuments({ status: 'approved', isDeleted: { $ne: true } });
 
     res.json({
       success: true,
@@ -63,13 +63,13 @@ router.get('/dashboard', [auth, authorize('admin', 'faculty')], async (req, res)
   try {
     const totalStudents = await User.countDocuments({ role: 'student' });
     const totalFaculty = await User.countDocuments({ role: 'faculty' });
-    const totalEvents = await Event.countDocuments();
-    const activeEvents = await Event.countDocuments({ status: { $in: ['published', 'ongoing'] } });
-    const completedEvents = await Event.countDocuments({ status: 'completed' });
+    const totalEvents = await Event.countDocuments({ isDeleted: { $ne: true } });
+    const activeEvents = await Event.countDocuments({ status: { $in: ['published', 'ongoing'] }, isDeleted: { $ne: true } });
+    const completedEvents = await Event.countDocuments({ status: 'completed', isDeleted: { $ne: true } });
     
-    const totalParticipations = await Participation.countDocuments();
-    const approvedParticipations = await Participation.countDocuments({ status: 'approved' });
-    const pendingParticipations = await Participation.countDocuments({ status: 'pending' });
+    const totalParticipations = await Participation.countDocuments({ isDeleted: { $ne: true } });
+    const approvedParticipations = await Participation.countDocuments({ status: 'approved', isDeleted: { $ne: true } });
+    const pendingParticipations = await Participation.countDocuments({ status: 'pending', isDeleted: { $ne: true } });
 
     // Get recent registrations (last 30 days)
     const thirtyDaysAgo = new Date();
@@ -121,12 +121,22 @@ router.get('/event-capacity', [auth, authorize('admin')], async (req, res) => {
     })
       .select('title maxParticipants currentParticipants startDate endDate status')
       .lean();
+    const redis = require('../config/redis');
 
     // Enrich with waitlist data
     const enrichedEvents = await Promise.all(events.map(async (event) => {
       const waitlisted = await Participation.countDocuments({
         event: event._id,
         waitlistStatus: 'waitlisted'
+        const cacheKey = 'landing:stats';
+        try {
+          const cached = await redis.get(cacheKey);
+          if (cached) {
+            return res.json(JSON.parse(cached));
+          }
+        } catch (cacheErr) {
+          console.warn('Redis cache read failed for landing stats:', cacheErr.message);
+        }
       });
 
       const fillingPercentage = event.maxParticipants 
@@ -163,14 +173,12 @@ router.get('/event-capacity', [auth, authorize('admin')], async (req, res) => {
     // Get events sorted by waitlist size (highest first)
     const eventsWithWaitlist = enrichedEvents
       .filter(e => e.waitlistedCount > 0)
-      .sort((a, b) => b.waitlistedCount - a.waitlistedCount);
-
-    // Get events sorted by filling percentage
-    const mostFilledEvents = enrichedEvents
-      .sort((a, b) => b.fillingPercentage - a.fillingPercentage)
-      .slice(0, 10);
-
-    res.json({
+        try {
+          await redis.setEx(cacheKey, 300, JSON.stringify(result));
+        } catch (cacheErr) {
+          console.warn('Redis cache write failed for landing stats:', cacheErr.message);
+        }
+        res.json(result);
       success: true,
       summary: {
         totalCapacityLimitedEvents: totalEvents,
