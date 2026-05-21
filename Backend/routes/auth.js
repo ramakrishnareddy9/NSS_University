@@ -32,6 +32,8 @@ router.post('/register', [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Please provide a valid email'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  // SECURITY: Reject any role field in registration — students only via public endpoint
+  body('role').not().exists().withMessage('Role cannot be specified during public registration'),
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -40,9 +42,9 @@ router.post('/register', [
     }
 
     const { name, email, password, studentId, phone, department, year, academicYear, batch } = req.body;
-    // Force public registrations to be students only. Reject attempts to register as elevated roles.
+    // Defense in depth: Even after validation, block any elevated role attempt
     if (req.body.role && (req.body.role === 'admin' || req.body.role === 'faculty')) {
-      console.warn(`Blocked public registration attempt with elevated role: ${req.body.role} for email ${email}`);
+      console.warn(`[SECURITY] Blocked public registration attempt with elevated role: ${req.body.role} for email ${email} from IP ${req.ip}`);
       return res.status(403).json({ success: false, message: 'Cannot register with elevated role. Use invite flow for admin/faculty accounts.' });
     }
     const role = 'student';

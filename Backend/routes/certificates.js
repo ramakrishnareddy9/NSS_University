@@ -11,24 +11,38 @@ const redis = require('../config/redis');
 
 const router = express.Router();
 
+// Debug endpoints are disabled in production. They should only be used in development.
+// If you need to debug certificate issues, use the /config/:eventId endpoint instead.
 const requireDebugAccess = (req, res, next) => {
+  // Deny all access to debug endpoints in production
+  if (process.env.NODE_ENV === 'production') {
+    console.warn(`Attempted access to debug endpoint from ${req.ip}, user: ${req.user?.id}`);
+    return res.status(403).json({ 
+      message: 'Debug endpoints are disabled in production',
+      code: 'DEBUG_ENDPOINTS_DISABLED'
+    });
+  }
+
+  // In development, only allow if explicitly enabled via secret
   if (process.env.NODE_ENV === 'development') {
+    const debugSecret = process.env.CERTIFICATE_DEBUG_SECRET;
+    if (debugSecret) {
+      const providedSecret = req.header('x-certificate-debug-secret');
+      if (providedSecret !== debugSecret) {
+        console.warn(`Unauthorized debug access attempt from ${req.ip}`);
+        return res.status(403).json({ message: 'Invalid debug secret' });
+      }
+    }
     return next();
   }
 
-  const debugSecret = process.env.CERTIFICATE_DEBUG_SECRET;
-  const providedSecret = req.header('x-certificate-debug-secret');
-
-  if (!debugSecret || providedSecret !== debugSecret) {
-    return res.status(403).json({ message: 'Debug endpoint is disabled' });
-  }
-
-  return next();
+  return res.status(403).json({ message: 'Debug endpoint access denied' });
 };
 
 // @route   POST /api/certificates/force-save-test/:eventId
-// @desc    TEST endpoint to force save a template URL (for debugging)
-// @access  Private (Admin/Faculty only)
+// @desc    [DEVELOPMENT ONLY] TEST endpoint to force save a template URL (for debugging)
+// @access  Private (Admin/Faculty only + Debug Secret)
+// @deprecated This endpoint should only be used during development. Use /config/:eventId instead.
 router.post('/force-save-test/:eventId', [
   auth,
   authorize('admin', 'faculty')
@@ -78,8 +92,9 @@ router.post('/force-save-test/:eventId', [
 });
 
 // @route   GET /api/certificates/debug/:eventId
-// @desc    Debug endpoint to check event configuration
-// @access  Private (Admin/Faculty only)
+// @desc    [DEVELOPMENT ONLY] Debug endpoint to check event configuration
+// @access  Private (Admin/Faculty only + Debug Secret)
+// @deprecated This endpoint should only be used during development. Use /config/:eventId instead.
 router.get('/debug/:eventId', [
   auth,
   authorize('admin', 'faculty')
