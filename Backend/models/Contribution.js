@@ -23,7 +23,14 @@ const contributionSchema = new mongoose.Schema({
   volunteerHours: {
     type: Number,
     required: true,
-    min: 0
+    min: 0,
+    max: 100
+  },
+  // Denormalized academic year copied from the Event at submission time
+  academicYear: {
+    type: String,
+    trim: true,
+    index: true
   },
   evidence: [{
     type: {

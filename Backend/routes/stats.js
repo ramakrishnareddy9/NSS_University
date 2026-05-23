@@ -4,12 +4,23 @@ const User = require('../models/User');
 const Event = require('../models/Event');
 const Participation = require('../models/Participation');
 const { auth, authorize } = require('../middleware/auth');
+const redis = require('../config/redis');
 
 // @route   GET /api/stats/landing
 // @desc    Get statistics for landing page
 // @access  Public
 router.get('/landing', async (req, res) => {
   try {
+    const cacheKey = 'landing:stats:v1';
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        return res.json(JSON.parse(cached));
+      }
+    } catch (cacheErr) {
+      console.warn('Redis cache read failed for landing stats:', cacheErr.message);
+    }
+
     // Count total students (users with role 'student')
     const totalStudents = await User.countDocuments({ role: 'student' });
 
@@ -38,14 +49,22 @@ router.get('/landing', async (req, res) => {
 
     const participations = await Participation.countDocuments({ status: 'approved', isDeleted: { $ne: true } });
 
-    res.json({
+    const result = {
       success: true,
       totalStudents,
       totalEvents,
       totalInstitutions,
       totalHours,
       participations
-    });
+    };
+
+    try {
+      await redis.setEx(cacheKey, 300, JSON.stringify(result));
+    } catch (cacheErr) {
+      console.warn('Redis cache write failed for landing stats:', cacheErr.message);
+    }
+
+    return res.json(result);
   } catch (error) {
     console.error('Error fetching landing statistics:', error);
     res.status(500).json({

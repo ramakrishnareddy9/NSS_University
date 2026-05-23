@@ -9,7 +9,25 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['new-event', 'participation-approved', 'participation-rejected', 'contribution-verified', 'certificate'],
+    enum: [
+      'new-event',
+      'event-status-changed',
+      'reg-deadline-warning',
+      'event-short-lead-warning',
+      'participation-approved',
+      'participation-rejected',
+      'participation-updated',
+      'participation-cancelled',
+      'new-participation',
+      'event-published',
+      'event-updated',
+      'event-cancelled',
+      'certificate',
+      'certificate-generated',
+      'certificate-ready',
+      'contribution-verified',
+      'system'
+    ],
     required: true
   },
   message: {

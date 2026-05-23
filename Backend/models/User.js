@@ -31,7 +31,8 @@ const userSchema = new mongoose.Schema({
   },
   phone: {
     type: String,
-    trim: true
+    trim: true,
+    match: [/^[+]?\d{10,15}$/, 'Invalid phone number format']
   },
   department: {
     type: String,
@@ -56,10 +57,7 @@ const userSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
-  contributions: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Contribution'
-  }],
+  // NOTE: `contributions` removed to avoid unbounded array growth. Query contributions via Contribution model.
   // Rewards and Points System
   rewardPoints: {
     type: Number,
@@ -115,6 +113,11 @@ const userSchema = new mongoose.Schema({
     pushNotifications: { type: Boolean, default: true },
     inAppNotifications: { type: Boolean, default: true }
   }
+  ,
+  fcmTokens: [{
+    token: { type: String },
+    createdAt: { type: Date, default: Date.now }
+  }]
 }, {
   timestamps: true
 });
@@ -124,6 +127,10 @@ userSchema.index({ role: 1, totalVolunteerHours: -1 });
 
 // Hash password before saving
 userSchema.pre('save', async function(next) {
+  if (this.isModified('phone') && typeof this.phone === 'string') {
+    this.phone = this.phone.replace(/[\s\-().]/g, '');
+  }
+
   if (!this.isModified('password')) return next();
   this.password = await bcrypt.hash(this.password, 10);
   next();

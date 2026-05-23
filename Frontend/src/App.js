@@ -36,6 +36,94 @@ import Leaderboard from './pages/Leaderboard';
 import FacultyDashboard from './pages/Faculty/Dashboard';
 import theme from './theme';
 
+/**
+ * Error Boundary component to catch unhandled render errors
+ */
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('React Error Boundary caught an error:', error, errorInfo);
+    // Optionally log to error reporting service here
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+          alignItems: 'center',
+          height: '100vh',
+          backgroundColor: '#f5f5f5',
+          fontFamily: 'system-ui, -apple-system, sans-serif'
+        }}>
+          <div style={{
+            textAlign: 'center',
+            padding: '2rem',
+            backgroundColor: 'white',
+            borderRadius: '8px',
+            boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
+            maxWidth: '500px'
+          }}>
+            <h1 style={{ color: '#e53e3e', marginTop: 0 }}>⚠️ Oops! Something went wrong</h1>
+            <p style={{ color: '#666', fontSize: '1rem', lineHeight: '1.6' }}>
+              The application encountered an unexpected error. Please try refreshing the page.
+            </p>
+            {process.env.NODE_ENV === 'development' && (
+              <details style={{
+                marginTop: '1rem',
+                padding: '1rem',
+                backgroundColor: '#f0f0f0',
+                borderRadius: '4px',
+                textAlign: 'left',
+                fontSize: '0.875rem',
+                color: '#333'
+              }}>
+                <summary style={{ cursor: 'pointer', fontWeight: 'bold' }}>Error Details</summary>
+                <pre style={{
+                  whiteSpace: 'pre-wrap',
+                  wordWrap: 'break-word',
+                  marginTop: '0.5rem',
+                  fontSize: '0.75rem'
+                }}>
+                  {this.state.error?.toString()}
+                </pre>
+              </details>
+            )}
+            <button
+              onClick={() => window.location.href = '/'}
+              style={{
+                marginTop: '1rem',
+                padding: '0.75rem 1.5rem',
+                backgroundColor: '#4299e1',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontSize: '1rem',
+                fontWeight: '500'
+              }}
+            >
+              Return to Home
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 function AppContent() {
   const location = useLocation();
   const noNavbarRoutes = ['/', '/login', '/register', '/verify-email', '/forgot-password'];
@@ -244,18 +332,20 @@ function AppContent() {
 
 function App() {
   return (
-    <CustomThemeProvider>
-      <ThemeProvider theme={theme}>
-        <CssBaseline />
-        <AuthProvider>
-          <SocketProvider>
-            <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-              <AppContent />
-            </Router>
-          </SocketProvider>
-        </AuthProvider>
-      </ThemeProvider>
-    </CustomThemeProvider>
+    <ErrorBoundary>
+      <CustomThemeProvider>
+        <ThemeProvider theme={theme}>
+          <CssBaseline />
+          <AuthProvider>
+            <SocketProvider>
+              <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+                <AppContent />
+              </Router>
+            </SocketProvider>
+          </AuthProvider>
+        </ThemeProvider>
+      </CustomThemeProvider>
+    </ErrorBoundary>
   );
 }
 

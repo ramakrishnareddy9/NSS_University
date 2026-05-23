@@ -68,8 +68,8 @@ async function notifyStudentsAboutEvent(event, req) {
       io.to(`user-${student._id}`).emit('new-event', notificationData);
     });
 
-    io.emit('new-event', notificationData);
-    io.emit('new-event-broadcast', notificationData);
+    // Emit a lightweight admin-scoped broadcast for dashboards (avoid public broadcast)
+    io.to('admin-notifications').emit('new-event-broadcast', notificationData);
   }
 
   const notificationPromises = students.map(student => Notification.create({
@@ -86,7 +86,7 @@ async function notifyStudentsAboutEvent(event, req) {
     },
     read: false
   }).catch(err => {
-    console.error(`Failed to store notification for ${student.name}:`, err.message);
+    console.error(`Failed to store notification for student id ${student._id}:`, err.message);
   }));
 
   await Promise.allSettled(notificationPromises);
@@ -165,7 +165,8 @@ router.get('/', auth, async (req, res) => {
     if (cursor) {
       // Cursor-based pagination using ObjectId ordering (newest first)
       try {
-        const cursorId = mongoose.Types.ObjectId(cursor);
+        // Mongoose 7 prefers `new mongoose.Types.ObjectId(...)` when constructing from string
+        const cursorId = new mongoose.Types.ObjectId(cursor);
         query._id = { $lt: cursorId };
       } catch (e) {
         return res.status(400).json({ success: false, message: 'Invalid cursor' });
@@ -252,15 +253,7 @@ router.get('/', auth, async (req, res) => {
 router.get('/:id', auth, validateObjectId('id'), async (req, res) => {
   try {
     const event = await Event.findById(req.params.id)
-      .populate('organizer', 'name email')
-      .populate({
-        path: 'participations',
-        match: { isDeleted: { $ne: true } },
-        populate: {
-          path: 'student',
-          select: 'name email studentId'
-        }
-      });
+      .populate('organizer', 'name email');
 
     if (!event) {
       return res.status(404).json({ success: false, message: 'Event not found' });
@@ -272,7 +265,12 @@ router.get('/:id', auth, validateObjectId('id'), async (req, res) => {
       plain.participationStatus = participation ? participation.status : null;
     }
 
-    res.json({ success: true, data: plain });
+    // When detailed participation list is required, fetch separately from Participation collection to avoid large Event docs.
+    const participations = await Participation.find({ event: event._id, isDeleted: { $ne: true } })
+      .populate('student', 'name email studentId')
+      .sort({ createdAt: -1 });
+
+    res.json({ success: true, data: { event: plain, participations } });
   } catch (error) {
     console.error('Get event error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -533,7 +531,8 @@ router.delete('/:id', [auth, authorize('admin'), validateObjectId('id')], async 
       try {
         const io = req.app.get('io');
         if (io) {
-          io.emit('event-cancelled', {
+          // Notify affected students in their private rooms
+          const notificationData = {
             type: 'event-cancelled',
             message: `Event "${transactionResult.event.title}" has been cancelled.`,
             event: {
@@ -542,7 +541,14 @@ router.delete('/:id', [auth, authorize('admin'), validateObjectId('id')], async 
               cancellationReason: transactionResult.event.cancellationReason
             },
             timestamp: new Date()
+          };
+
+          studentsToNotify.forEach(student => {
+            io.to(`user-${student._id}`).emit('event-cancelled', notificationData);
           });
+
+          // Admin-scoped broadcast
+          io.to('admin-notifications').emit('event-cancelled', notificationData);
         }
       } catch (socketError) {
         console.error('Socket emission failed for event cancellation:', socketError);

@@ -27,4 +27,9 @@ problemUpvoteSchema.index({ problem: 1 });
 // Index to quickly find problems upvoted by a user
 problemUpvoteSchema.index({ upvotedBy: 1 });
 
+// Soft-delete flag for compatibility with global soft-delete plugin
+problemUpvoteSchema.add({
+  isDeleted: { type: Boolean, default: false, index: true }
+});
+
 module.exports = mongoose.model('ProblemUpvote', problemUpvoteSchema);

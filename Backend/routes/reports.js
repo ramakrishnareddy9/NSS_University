@@ -74,14 +74,7 @@ const router = express.Router();
 router.get('/event/:id', [auth, authorize('admin', 'faculty'), validateObjectId('id')], async (req, res) => {
   try {
     const event = await Event.findById(req.params.id)
-      .populate('organizer', 'name email')
-      .populate({
-        path: 'participations',
-        populate: {
-          path: 'student',
-          select: 'name email studentId department'
-        }
-      });
+      .populate('organizer', 'name email');
 
     if (!event) {
       return res.status(404).json({ message: 'Event not found' });
@@ -898,6 +891,25 @@ router.get('/file-proxy', [auth, authorize('admin', 'faculty')], async (req, res
     const fileUrl = req.query.url;
     const publicId = req.query.publicId;
     const resourceType = req.query.resourceType || 'raw';
+
+    // If a reportId is provided, validate ownership/permissions before proceeding
+    const reportId = req.query.reportId;
+    if (reportId) {
+      try {
+        const reportRecord = await Report.findById(reportId).select('student');
+        if (!reportRecord) {
+          return res.status(404).json({ message: 'Report not found' });
+        }
+
+        // Only admins/faculty or the owner student may request proxy access
+        if (req.user.role === 'student' && reportRecord.student.toString() !== req.user.id) {
+          return res.status(403).json({ message: 'Not authorized to access this file' });
+        }
+      } catch (err) {
+        console.warn('Failed to verify report ownership for file-proxy:', err.message);
+        return res.status(400).json({ message: 'Invalid reportId' });
+      }
+    }
 
     // Prefer signed URL generation when publicId is provided.
     if (publicId && typeof publicId === 'string') {

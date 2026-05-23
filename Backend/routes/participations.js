@@ -5,6 +5,7 @@ const Event = require('../models/Event');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
 const { auth, authorize } = require('../middleware/auth');
+const { body, validationResult } = require('express-validator');
 const validateObjectId = require('../middleware/validateObjectId');
 const appConfig = require('../config/appConfig');
 const AuditLog = require('../models/AuditLog');
@@ -91,8 +92,13 @@ router.get('/', auth, async (req, res) => {
 // @route   POST /api/participations
 // @desc    Register for an event or join waitlist if full
 // @access  Private (Students only)
-router.post('/', [auth, authorize('student')], async (req, res) => {
+router.post('/', [auth, authorize('student'), body('eventId').notEmpty().isMongoId().withMessage('Valid eventId is required')], async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
     const { eventId } = req.body;
 
     if (!eventId) {
@@ -138,16 +144,31 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
           throw error;
         }
 
-        // Determine if adding to waitlist or registering directly
+        // Determine if adding to waitlist or registering directly.
+        // Reserve a slot atomically when the event has a capacity limit.
         let isWaitlisted = false;
-        if (event.maxParticipants && event.currentParticipants >= event.maxParticipants) {
-          isWaitlisted = true;
+        if (event.maxParticipants != null) {
+          const reservedEvent = await Event.findOneAndUpdate(
+            {
+              _id: eventId,
+              currentParticipants: { $lt: event.maxParticipants }
+            },
+            {
+              $inc: { currentParticipants: 1 }
+            },
+            { session, new: true }
+          );
+
+          if (!reservedEvent) {
+            isWaitlisted = true;
+          }
         }
 
         // Create participation
         participation = new Participation({
           student: req.user.id,
           event: eventId,
+          academicYear: event.academicYear || null,
           status: 'pending',
           waitlistStatus: isWaitlisted ? 'waitlisted' : 'none',
           waitlistedAt: isWaitlisted ? new Date() : undefined
@@ -155,19 +176,7 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
 
         await participation.save({ session });
 
-        // Atomically update event
-        if (!isWaitlisted) {
-          // Only increment if not waitlisted
-          await Event.findByIdAndUpdate(eventId, {
-            $inc: { currentParticipants: 1 },
-            $push: { participations: participation._id }
-          }, { session });
-        } else {
-          // Just add to participations array for waitlist tracking
-          await Event.findByIdAndUpdate(eventId, {
-            $push: { participations: participation._id }
-          }, { session });
-        }
+        // Slot reservation is handled above; waitlisted registrations do not change the count.
       });
     } catch (txnError) {
       if (txnError.statusCode) {
@@ -183,16 +192,16 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
 
     // Send appropriate notification
     try {
-      if (participation.waitlistStatus === 'waitlisted') {
+        if (participation.waitlistStatus === 'waitlisted') {
         const waitlistPosition = await Participation.countDocuments({
           event: eventId,
           waitlistStatus: 'waitlisted',
           waitlistedAt: { $lt: participation.waitlistedAt }
         }) + 1;
         
-        const subject = `Waitlisted for: ${participation.event.title}`;
-        const text = `You have been added to the waitlist for "${participation.event.title}". Position: ${waitlistPosition}`;
-        console.log(`📧 Sending waitlist confirmation to ${participation.student.email}: position ${waitlistPosition}`);
+        console.debug(`Waitlist confirmation queued for email (position ${waitlistPosition})`);
+        // Send generic registration confirmation for now (waitlist position included in logs/audit)
+        await sendRegistrationConfirmation(participation.student, participation.event);
       } else {
         await sendRegistrationConfirmation(participation.student, participation.event);
       }
@@ -200,26 +209,25 @@ router.post('/', [auth, authorize('student')], async (req, res) => {
       console.error('Failed to send confirmation email:', error);
     }
 
-    // Send WebSocket notification to admins
+    // SEC-03: Send WebSocket notification to admin room only (not broadcast to all)
     try {
       const io = req.app.get('io');
       if (io) {
-        io.emit('new-participation', {
+        // Only send to admin room - not a public broadcast
+        io.to('admin-notifications').emit('new-participation', {
           type: 'new-participation',
-          message: `New ${participation.waitlistStatus === 'waitlisted' ? 'waitlist' : 'registration'} for "${participation.event.title}"`,
+          message: `New ${participation.waitlistStatus === 'waitlisted' ? 'waitlist' : 'registration'} for event`,
           participation: {
             id: participation._id,
-            student: participation.student,
-            event: participation.event,
+            eventId: participation.event._id,
             status: participation.status,
             waitlistStatus: participation.waitlistStatus
           },
           timestamp: new Date()
         });
-        console.log(`🔔 Socket: New participation emitted for event: ${participation.event.title}`);
       }
     } catch (socketError) {
-      console.error('Socket emission failed for registration:', socketError);
+      console.error('Socket emission failed:', socketError);
     }
 
     res.status(201).json({
@@ -278,8 +286,7 @@ router.put('/:id/approve', [auth, authorize('admin', 'faculty'), validateObjectI
     await participation.populate('student', 'name email studentId notificationPreferences');
     await participation.populate('event', 'title eventType startDate endDate location');
 
-    console.log(`\n=== Approving participation for student: ${participation.student.name} (${participation.student.email}) ===`);
-    console.log(`Event: ${participation.event.title}`);
+    console.debug('Participation approval requested');
 
     // Send approval notification email to the approved student
     if (participation.student.email) {
@@ -322,11 +329,11 @@ router.put('/:id/approve', [auth, authorize('admin', 'faculty'), validateObjectI
           timestamp: new Date()
         };
 
-        console.log(`📤 Sending approval notification to room: ${roomName}`);
+        console.debug(`Sending approval notification to user room`);
         io.to(roomName).emit('participation-approved', notificationData);
 
-        // Also emit to the socket directly if we can find it
-        io.emit('participation-approved-broadcast', {
+        // Also emit an admin-scoped notification for dashboards (no PII)
+        io.to('admin-notifications').emit('participation-approved', {
           ...notificationData,
           targetUserId: studentId
         });
@@ -345,12 +352,12 @@ router.put('/:id/approve', [auth, authorize('admin', 'faculty'), validateObjectI
             },
             read: false
           });
-          console.log(`💾 Notification stored in database for student ${studentId}`);
+          console.debug(`Notification stored in database for student ${studentId}`);
         } catch (err) {
           console.error(`❌ Failed to store notification:`, err.message);
         }
 
-        console.log(`🔔 WebSocket notification sent to student ${studentId}`);
+        console.debug(`WebSocket notification sent to student ${studentId}`);
       } else {
         console.warn('⚠️ Socket.IO not available');
       }
@@ -358,22 +365,22 @@ router.put('/:id/approve', [auth, authorize('admin', 'faculty'), validateObjectI
       console.error('❌ Failed to send WebSocket notification:', error);
     }
 
-    // Broadcast update to everyone (especially admins)
+    // Send admin-scoped participation-updated notification (avoid public broadcast)
     try {
       const io = req.app.get('io');
       if (io) {
-        io.emit('participation-updated', {
+        io.to('admin-notifications').emit('participation-updated', {
           type: 'participation-updated',
-          message: `Participation updated for "${participation.event.title}"`,
+          message: `Participation updated for an event`,
           participation: {
             id: participation._id,
-            student: participation.student,
-            event: participation.event,
+            student: { id: participation.student._id, studentId: participation.student.studentId },
+            event: { id: participation.event._id, title: participation.event.title },
             status: participation.status
           },
           timestamp: new Date()
         });
-        console.log(`🔄 Socket: Participation update emitted for student: ${participation.student.name}`);
+        console.debug('Admin-scoped participation-updated emitted');
       }
     } catch (socketError) {
       console.error('Socket emission failed for approval:', socketError);
@@ -392,38 +399,53 @@ router.put('/:id/approve', [auth, authorize('admin', 'faculty'), validateObjectI
 // @access  Private (Admin/Faculty only)
 router.put('/:id/reject', [auth, authorize('admin', 'faculty'), validateObjectId('id')], async (req, res) => {
   try {
-    const participation = await Participation.findById(req.params.id);
-
-    if (!participation || participation.isDeleted) {
-      return res.status(404).json({ message: 'Participation not found' });
-    }
-
-    if (participation.status !== 'pending') {
-      return res.status(400).json({ message: 'Participation is not pending' });
-    }
-
     const session = await mongoose.startSession();
+    let participation = null;
     try {
       await session.withTransaction(async () => {
-        const participationInTxn = await Participation.findById(participation._id).session(session);
-        participationInTxn.status = 'rejected';
-        participationInTxn.rejectedAt = new Date();
-        participationInTxn.rejectedBy = req.user.id;
+        participation = await Participation.findOneAndUpdate(
+          {
+            _id: req.params.id,
+            status: 'pending',
+            isDeleted: { $ne: true }
+          },
+          {
+            $set: {
+              status: 'rejected',
+              rejectedAt: new Date(),
+              rejectedBy: req.user.id
+            }
+          },
+          {
+            new: true,
+            session
+          }
+        );
 
-        await participationInTxn.save({ session });
+        if (!participation) {
+          const error = new Error('Participation not found or is not pending');
+          error.statusCode = 400;
+          throw error;
+        }
+
+        const participationInTxn = participation;
 
         // Atomically decrement participant count and remove participation reference from event
-        await Event.findByIdAndUpdate(participationInTxn.event, {
-          $inc: { currentParticipants: -1 },
-          $pull: { participations: participationInTxn._id }
-        }, { session });
+        // BL-02: Only decrement participant count if the participant wasn't waitlisted
+        if (participationInTxn.waitlistStatus !== 'waitlisted') {
+          await Event.findByIdAndUpdate(participationInTxn.event, {
+            $inc: { currentParticipants: -1 }
+          }, { session });
+        }
       });
     } finally {
       session.endSession();
     }
 
-    await participation.populate('student', 'name email studentId');
-    await participation.populate('event', 'title eventType');
+    // Refresh participation to get updated status from transaction
+    participation = await Participation.findById(participation._id)
+      .populate('student', 'name email studentId')
+      .populate('event', 'title eventType');
 
     // Invalidate caches (best-effort)
     try {
@@ -433,17 +455,17 @@ router.put('/:id/reject', [auth, authorize('admin', 'faculty'), validateObjectId
       console.warn('Cache invalidation failed after rejection:', cacheErr.message);
     }
 
-    // Broadcast update
+    // Send admin-scoped update (avoid public broadcast)
     try {
       const io = req.app.get('io');
       if (io) {
-        io.emit('participation-updated', {
+        io.to('admin-notifications').emit('participation-updated', {
           type: 'participation-updated',
-          message: `Participation rejected for "${participation.event.title}"`,
+          message: `Participation rejected for an event`,
           participation: {
             id: participation._id,
-            student: participation.student,
-            event: participation.event,
+            student: { id: participation.student._id, studentId: participation.student.studentId },
+            event: { id: participation.event._id, title: participation.event.title },
             status: participation.status
           },
           timestamp: new Date()
@@ -561,25 +583,17 @@ router.put('/:id/complete', [auth, authorize('admin', 'faculty'), validateObject
       console.warn('Cache invalidation failed after completion:', cacheErr.message);
     }
 
-    // Invalidate caches (best-effort)
-    try {
-      await redis.del('landing:stats');
-      await redis.purgePattern('leaderboard:*');
-    } catch (cacheErr) {
-      console.warn('Cache invalidation failed after attendance change:', cacheErr.message);
-    }
-
-    // Emit socket event
+    // Emit admin-scoped socket event (avoid public broadcast)
     try {
       const io = req.app.get('io');
       if (io) {
-        io.emit('participation-updated', {
+        io.to('admin-notifications').emit('participation-updated', {
           type: 'participation-updated',
-          message: `Participation completed for "${participation.event.title}"`,
+          message: `Participation completed for an event`,
           participation: {
             id: participation._id,
-            student: participation.student,
-            event: participation.event,
+            student: { id: participation.student._id, studentId: participation.student.studentId },
+            event: { id: participation.event._id, title: participation.event.title },
             status: participation.status
           },
           timestamp: new Date()
@@ -599,8 +613,12 @@ router.put('/:id/complete', [auth, authorize('admin', 'faculty'), validateObject
 // @route   PUT /api/participations/:id/attendance
 // @desc    Mark attendance
 // @access  Private (Admin/Faculty only)
-router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObjectId('id')], async (req, res) => {
+router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObjectId('id'), body('attended').isBoolean().withMessage('attended must be boolean'), body('force').optional().isBoolean()], async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
     const { attended } = req.body;
     console.log('\n🎯 === ATTENDANCE MARKING REQUEST ===');
     console.log('Participation ID:', req.params.id);
@@ -669,9 +687,8 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
       }
     }
 
-    console.log('Student:', participation.student.name);
-    console.log('Current Student Hours:', participation.student.totalVolunteerHours);
-    console.log('Event:', participation.event.title);
+    // SEC-07: Don't log PII to stdout - use audit logs instead
+    console.debug('Attendance marking in progress');
 
     const session = await mongoose.startSession();
     let auditPayload = null;
@@ -733,11 +750,8 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
             const oldTotal = student.totalVolunteerHours || 0;
             student.totalVolunteerHours = Math.max(0, oldTotal + participationInTxn.volunteerHours);
             await student.save({ session });
-            console.log(`✅ HOURS UPDATED!`);
-            console.log(`   Student: ${student.name}`);
-            console.log(`   Previous Total: ${oldTotal} hours`);
-            console.log(`   Added: ${participationInTxn.volunteerHours} hours`);
-            console.log(`   New Total: ${student.totalVolunteerHours} hours`);
+            console.debug('Volunteer hours updated for student (id):', student._id);
+            console.debug(`Previous Total: ${oldTotal}h, Added: ${participationInTxn.volunteerHours}h`);
 
             auditPayload = {
               action: 'attendance_hours_calculated',
@@ -764,15 +778,12 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
         } else if (!attended && wasAttended) {
           console.log('\n⚠️ Unmarking attendance - removing hours...');
           // If unmarking attendance, subtract the hours
-          if (student && participationInTxn.volunteerHours) {
+            if (student && participationInTxn.volunteerHours) {
             const oldTotal = student.totalVolunteerHours || 0;
             student.totalVolunteerHours = Math.max(0, oldTotal - participationInTxn.volunteerHours);
             await student.save({ session });
-            console.log(`⚠️ HOURS REMOVED!`);
-            console.log(`   Student: ${student.name}`);
-            console.log(`   Previous Total: ${oldTotal} hours`);
-            console.log(`   Removed: ${participationInTxn.volunteerHours} hours`);
-            console.log(`   New Total: ${student.totalVolunteerHours} hours`);
+            console.debug('Volunteer hours removed for student (id):', student._id);
+            console.debug(`Previous Total: ${oldTotal}h, Removed: ${participationInTxn.volunteerHours}h`);
 
             auditPayload = {
               action: 'attendance_hours_reversed',
@@ -833,17 +844,17 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
     await participation.populate('student', 'name email studentId totalVolunteerHours');
     await participation.populate('event', 'title eventType');
 
-    // Broadcast update
+    // Emit admin-scoped update (avoid public broadcast)
     try {
       const io = req.app.get('io');
       if (io) {
-        io.emit('participation-updated', {
+        io.to('admin-notifications').emit('participation-updated', {
           type: 'participation-updated',
-          message: `Attendance updated for "${participation.event.title}"`,
+          message: `Attendance updated for an event`,
           participation: {
             id: participation._id,
-            student: participation.student,
-            event: participation.event,
+            student: { id: participation.student._id, studentId: participation.student.studentId },
+            event: { id: participation.event._id, title: participation.event.title },
             status: participation.status,
             attendance: participation.attendance
           },
@@ -854,8 +865,7 @@ router.put('/:id/attendance', [auth, authorize('admin', 'faculty'), validateObje
       console.error('Socket emission failed for attendance:', socketError);
     }
 
-    console.log('📤 Sending response with updated data');
-    console.log('=== END ATTENDANCE MARKING ===\n');
+    console.debug('Sending response with updated participation');
     if (lateAttendanceWarning) {
       return res.json({
         ...participation.toObject(),
@@ -929,7 +939,7 @@ router.delete('/:id', [auth, validateObjectId('id')], async (req, res) => {
             if (promotedStudent) {
               try {
                 // Check if user wants waitlist promotion emails
-                const emailEnabled = !promotedStudent.notificationPreferences?.emailNotifications?.waitlistPromotion === false;
+                const emailEnabled = promotedStudent.notificationPreferences?.emailNotifications?.waitlistPromotion !== false;
                 if (emailEnabled) {
                   await sendWaitlistPromotionNotification(promotedStudent, eventInTxn);
                   console.log(`✅ Waitlist promotion notification sent to ${promotedStudent.email}`);

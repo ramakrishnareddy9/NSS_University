@@ -1,5 +1,4 @@
-const PDFDocument = require('pdfkit');
-const { Readable } = require('stream');
+const { jsPDF } = require('jspdf');
 
 /**
  * Generate OD Letter PDF for a group of students by department
@@ -10,174 +9,136 @@ const { Readable } = require('stream');
  * @returns {Promise<Buffer>} PDF buffer
  */
 async function generateODLetterPDF({ event, participants, department }) {
-  return new Promise((resolve, reject) => {
-    try {
-      const doc = new PDFDocument({
-        size: 'A4',
-        margin: 50,
-        bufferPages: true
-      });
+  const deptParticipants = participants.filter(p => p.department === department);
+  const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
 
-      const chunks = [];
-      doc.on('data', chunk => chunks.push(chunk));
-      doc.on('end', () => resolve(Buffer.concat(chunks)));
-      doc.on('error', reject);
+  if (deptParticipants.length === 0) {
+    pdf.setFontSize(12);
+    pdf.text('No participants found for this department', 20, 20);
+    return Buffer.from(pdf.output('arraybuffer'));
+  }
 
-      // Filter participants by department
-      const deptParticipants = participants.filter(p => p.department === department);
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(16);
+  pdf.text('NSS UNIT', pageWidth / 2, 20, { align: 'center' });
+  pdf.setFont('helvetica', 'normal');
+  pdf.setFontSize(12);
+  pdf.text('University Activity Portal', pageWidth / 2, 28, { align: 'center' });
+  pdf.setFontSize(10);
+  pdf.text(`Department of ${department}`, pageWidth / 2, 35, { align: 'center' });
+  pdf.line(20, 42, pageWidth - 20, 42);
 
-      if (deptParticipants.length === 0) {
-        doc.text('No participants found for this department');
-        doc.end();
-        return;
-      }
+  pdf.text(`Date: ${new Date().toLocaleDateString()}`, 20, 50);
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(14);
+  pdf.text('ON DUTY (OD) LETTER', pageWidth / 2, 60, { align: 'center' });
 
-      // Add letterhead
-      doc.fontSize(16).font('Helvetica-Bold').text('NSS UNIT', 50, 50, { align: 'center' });
-      doc.fontSize(12).font('Helvetica').text('University Activity Portal', { align: 'center' });
-      doc.fontSize(10).text(`Department of ${department}`, { align: 'center' });
-      doc.moveTo(50, 130).lineTo(550, 130).stroke();
+  let yPosition = 75;
+  const lineHeight = 7;
 
-      // Date
-      doc.fontSize(10).font('Helvetica').text(`Date: ${new Date().toLocaleDateString()}`, 50, 150);
+  pdf.setFont('helvetica', 'normal');
+  pdf.setFontSize(11);
+  pdf.text('To Whom It May Concern,', 20, yPosition);
+  yPosition += lineHeight * 2;
 
-      // Title
-      doc.fontSize(14).font('Helvetica-Bold').text('ON DUTY (OD) LETTER', 50, 190, { align: 'center' });
+  const intro = `This is to certify that the following students from ${department} department participated in the event titled "${event.title}" held on ${new Date(event.startDate).toLocaleDateString()}.`;
+  const introLines = pdf.splitTextToSize(intro, pageWidth - 40);
+  pdf.text(introLines, 20, yPosition);
+  yPosition += introLines.length * lineHeight + 4;
 
-      // Letter content
-      doc.fontSize(11).font('Helvetica');
-      const currentY = 240;
-      const lineHeight = 15;
-      let yPosition = currentY;
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(10);
+  pdf.text('Event Details:', 20, yPosition);
+  yPosition += lineHeight;
 
-      doc.text('To Whom It May Concern,', 50, yPosition);
-      yPosition += lineHeight * 2;
+  pdf.setFont('helvetica', 'normal');
+  pdf.text(`Event Title: ${event.title}`, 25, yPosition);
+  yPosition += lineHeight;
+  pdf.text(
+    `Date: ${new Date(event.startDate).toLocaleDateString()} (${new Date(event.startDate).toTimeString().slice(0, 5)} - ${new Date(event.endDate).toTimeString().slice(0, 5)})`,
+    25,
+    yPosition
+  );
+  yPosition += lineHeight;
+  pdf.text(`Location: ${event.location}`, 25, yPosition);
+  yPosition += lineHeight * 2;
 
-      doc.text(
-        `This is to certify that the following students from ${department} department participated in the event titled "${event.title}" held on ${new Date(event.startDate).toLocaleDateString()}.`,
-        50,
-        yPosition,
-        { width: 500 }
-      );
-      yPosition += lineHeight * 3;
+  pdf.setFont('helvetica', 'bold');
+  pdf.text('Participants:', 20, yPosition);
+  yPosition += 5;
 
-      // Event Details
-      doc.fontSize(10).font('Helvetica-Bold').text('Event Details:', 50, yPosition);
-      yPosition += lineHeight;
+  const col1 = 20;
+  const col2 = 60;
+  const col3 = 115;
+  const col4 = 150;
+  const rowHeight = 8;
 
-      doc.font('Helvetica').fontSize(10);
-      doc.text(`Event Title: ${event.title}`, 60, yPosition);
-      yPosition += lineHeight;
+  const drawHeader = () => {
+    pdf.setFillColor(232, 232, 232);
+    pdf.rect(col1, yPosition, pageWidth - 40, rowHeight, 'F');
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(9);
+    pdf.text('Reg. No.', col1 + 2, yPosition + 5);
+    pdf.text('Name', col2 + 2, yPosition + 5);
+    pdf.text('Year', col3 + 2, yPosition + 5);
+    pdf.text('Status', col4 + 2, yPosition + 5);
+    yPosition += rowHeight;
+  };
 
-      doc.text(
-        `Date: ${new Date(event.startDate).toLocaleDateString()} (${new Date(event.startDate).toTimeString().slice(0, 5)} - ${new Date(event.endDate).toTimeString().slice(0, 5)})`,
-        60,
-        yPosition
-      );
-      yPosition += lineHeight;
+  drawHeader();
 
-      doc.text(`Location: ${event.location}`, 60, yPosition);
-      yPosition += lineHeight * 2;
-
-      // Participants Table
-      doc.fontSize(10).font('Helvetica-Bold').text('Participants:', 50, yPosition);
-      yPosition += lineHeight + 5;
-
-      // Table headers
-      const tableY = yPosition;
-      const col1 = 50;
-      const col2 = 140;
-      const col3 = 280;
-      const col4 = 420;
-      const colWidth = 80;
-      const rowHeight = 25;
-
-      // Draw header row with background
-      doc.rect(col1, tableY, 500, rowHeight).fill('#e8e8e8');
-      doc.fill('#000000');
-
-      doc.fontSize(9).font('Helvetica-Bold');
-      doc.text('Reg. No.', col1 + 5, tableY + 5, { width: colWidth - 10 });
-      doc.text('Name', col2 + 5, tableY + 5, { width: colWidth - 10 });
-      doc.text('Year', col3 + 5, tableY + 5, { width: colWidth - 10 });
-      doc.text('Status', col4 + 5, tableY + 5, { width: colWidth - 10 });
-
-      yPosition = tableY + rowHeight;
-      const maxTableHeight = 420;
-
-      // Add participant rows
-      let rowCount = 0;
-      deptParticipants.forEach((participant, index) => {
-        if (yPosition > maxTableHeight) {
-          // Add new page if table exceeds space
-          doc.addPage();
-          yPosition = 50;
-        }
-
-        // Alternate row background
-        if (index % 2 === 0) {
-          doc.rect(col1, yPosition, 500, rowHeight).fill('#f5f5f5');
-          doc.fill('#000000');
-        }
-
-        doc.fontSize(9).font('Helvetica');
-        doc.text(participant.registrationNumber || '-', col1 + 5, yPosition + 5, { width: colWidth - 10 });
-        doc.text(participant.name || '-', col2 + 5, yPosition + 5, { width: colWidth - 10 });
-        doc.text(participant.year || '-', col3 + 5, yPosition + 5, { width: colWidth - 10 });
-        doc.text(participant.status || '-', col4 + 5, yPosition + 5, { width: colWidth - 10 });
-
-        yPosition += rowHeight;
-        rowCount++;
-      });
-
-      // Footer section
-      yPosition += lineHeight;
-
-      doc.fontSize(10).font('Helvetica').text(
-        'These students are hereby absolved from their regular class attendance on the aforementioned date for their participation in the said activity.',
-        50,
-        yPosition,
-        { width: 500 }
-      );
-
-      yPosition += lineHeight * 3;
-
-      // Signatures section
-      doc.fontSize(9).font('Helvetica-Bold').text('Faculty Signature:', 50, yPosition);
-      yPosition += lineHeight * 2;
-
-      doc.moveTo(50, yPosition).lineTo(200, yPosition).stroke();
-      doc.fontSize(8).font('Helvetica').text('___________________', 50, yPosition + 5);
-
-      doc.fontSize(9).font('Helvetica-Bold').text('Faculty Name & Date', 50, yPosition + 20);
-
-      yPosition += lineHeight * 3;
-
-      doc.fontSize(9).font('Helvetica-Bold').text('NSS Coordinator Signature:', 300, yPosition - 35);
-      yPosition -= 35;
-
-      doc.moveTo(300, yPosition + 40).lineTo(450, yPosition + 40).stroke();
-      doc.fontSize(8).font('Helvetica').text('___________________', 300, yPosition + 45);
-
-      doc.fontSize(9).font('Helvetica-Bold').text('NSS Coordinator', 300, yPosition + 60);
-
-      // Footer
-      const pageCount = doc.bufferedPageRange().count;
-      for (let i = 1; i <= pageCount; i++) {
-        doc.switchToPage(i - 1);
-        doc.fontSize(8).font('Helvetica').text(
-          `Page ${i} of ${pageCount}`,
-          50,
-          doc.page.height - 30,
-          { align: 'center' }
-        );
-      }
-
-      doc.end();
-    } catch (error) {
-      reject(error);
+  deptParticipants.forEach((participant, index) => {
+    if (yPosition > pageHeight - 35) {
+      pdf.addPage();
+      yPosition = 20;
+      drawHeader();
     }
+
+    if (index % 2 === 0) {
+      pdf.setFillColor(245, 245, 245);
+      pdf.rect(col1, yPosition, pageWidth - 40, rowHeight, 'F');
+    }
+
+    pdf.setFont('helvetica', 'normal');
+    pdf.setFontSize(9);
+    pdf.text(String(participant.registrationNumber || '-'), col1 + 2, yPosition + 5);
+    pdf.text(String(participant.name || '-'), col2 + 2, yPosition + 5);
+    pdf.text(String(participant.year || '-'), col3 + 2, yPosition + 5);
+    pdf.text(String(participant.status || '-'), col4 + 2, yPosition + 5);
+    yPosition += rowHeight;
   });
+
+  yPosition += lineHeight;
+  const footer = 'These students are hereby absolved from their regular class attendance on the aforementioned date for their participation in the said activity.';
+  const footerLines = pdf.splitTextToSize(footer, pageWidth - 40);
+  pdf.text(footerLines, 20, yPosition);
+  yPosition += footerLines.length * lineHeight + 10;
+
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(9);
+  pdf.text('Faculty Signature:', 20, yPosition);
+  pdf.line(20, yPosition + 10, 70, yPosition + 10);
+  pdf.setFont('helvetica', 'normal');
+  pdf.setFontSize(8);
+  pdf.text('Faculty Name & Date', 20, yPosition + 15);
+
+  pdf.setFont('helvetica', 'bold');
+  pdf.text('NSS Coordinator Signature:', 110, yPosition);
+  pdf.line(110, yPosition + 10, 170, yPosition + 10);
+  pdf.setFont('helvetica', 'normal');
+  pdf.setFontSize(8);
+  pdf.text('NSS Coordinator', 110, yPosition + 15);
+
+  const pageCount = pdf.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    pdf.setPage(i);
+    pdf.setFontSize(8);
+    pdf.text(`Page ${i} of ${pageCount}`, pageWidth / 2, pageHeight - 10, { align: 'center' });
+  }
+
+  return Buffer.from(pdf.output('arraybuffer'));
 }
 
 /**

@@ -1,5 +1,6 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { body, validationResult } = require('express-validator');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
@@ -12,17 +13,70 @@ const { resolveAcademicYearContext } = require('../utils/academicYear');
 
 const router = express.Router();
 const jwtSecret = process.env.JWT_SECRET;
+const refreshSecret = process.env.REFRESH_TOKEN_SECRET || jwtSecret;
+const accessTokenExpiresIn = process.env.JWT_EXPIRE || '1h';
+const refreshTokenExpiresIn = process.env.JWT_REFRESH_EXPIRE || '30d';
 
 if (!jwtSecret || !jwtSecret.trim()) {
   console.error('FATAL: JWT_SECRET environment variable is not set. Aborting startup.');
   throw new Error('JWT_SECRET environment variable is required');
 }
 
-// Generate JWT Token
-const generateToken = (id) => {
+const cookieOptions = () => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+  path: '/api/v1/auth',
+  maxAge: 30 * 24 * 60 * 60 * 1000
+});
+
+const csrfCookieOptions = () => ({
+  httpOnly: false,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+  path: '/api/v1/auth',
+  maxAge: 30 * 24 * 60 * 60 * 1000
+});
+
+const getCookie = (req, name) => {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return null;
+
+  const cookies = cookieHeader.split(';').map(part => part.trim());
+  const match = cookies.find(part => part.startsWith(`${name}=`));
+  if (!match) return null;
+
+  return decodeURIComponent(match.slice(name.length + 1));
+};
+
+// Generate JWT token pair
+const generateAccessToken = (id) => {
   return jwt.sign({ id }, jwtSecret, {
-    expiresIn: process.env.JWT_EXPIRE || '7d'
+    expiresIn: accessTokenExpiresIn
   });
+};
+
+const generateRefreshToken = (id) => {
+  return jwt.sign({ id, type: 'refresh' }, refreshSecret, {
+    expiresIn: refreshTokenExpiresIn
+  });
+};
+
+const attachAuthCookies = (res, refreshToken) => {
+  res.cookie('refreshToken', refreshToken, cookieOptions());
+  const csrfToken = crypto.randomBytes(32).toString('hex');
+  res.cookie('refreshCsrfToken', csrfToken, csrfCookieOptions());
+  return csrfToken;
+};
+
+const getCsrfToken = (req) => {
+  return req.header('x-refresh-csrf-token') || req.header('x-csrf-token') || null;
+};
+
+const validateRefreshCsrf = (req) => {
+  const csrfCookie = getCookie(req, 'refreshCsrfToken');
+  const csrfHeader = getCsrfToken(req);
+  return !!csrfCookie && !!csrfHeader && csrfCookie === csrfHeader;
 };
 
 // @route   POST /api/auth/register
@@ -131,7 +185,7 @@ router.post('/register', [
       message: 'Registration successful. Please verify your email with the OTP sent to your inbox.',
       data: {
         email: user.email,
-        requiresVerification: true
+        requiresVerification: true,
       }
     });
   } catch (error) {
@@ -183,13 +237,15 @@ router.post('/verify-email', [
     otpRecord.isUsed = true;
     await otpRecord.save();
 
-    const token = generateToken(user._id);
+    const accessToken = generateAccessToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+    attachAuthCookies(res, refreshToken);
 
     res.json({
       success: true,
       message: 'Email verified successfully',
       data: {
-        token,
+        accessToken,
         user: {
           id: user._id,
           name: user.name,
@@ -241,12 +297,15 @@ router.post('/login', [
       return res.status(401).json({ success: false, message: 'Account is deactivated' });
     }
 
-    const token = generateToken(user._id);
+    const accessToken = generateAccessToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+    attachAuthCookies(res, refreshToken);
 
     res.json({
       success: true,
       data: {
-        token,
+        token: accessToken,
+        accessToken,
         user: {
           id: user._id,
           name: user.name,
@@ -263,8 +322,70 @@ router.post('/login', [
   }
 });
 
+// @route   POST /api/auth/refresh
+// @desc    Exchange refresh token cookie for a new access token
+// @access  Public
+router.post('/refresh', async (req, res) => {
+  try {
+    const refreshToken = getCookie(req, 'refreshToken');
+    if (!refreshToken) {
+      return res.status(401).json({ success: false, message: 'Refresh token missing' });
+    }
+
+    if (!validateRefreshCsrf(req)) {
+      return res.status(403).json({ success: false, message: 'Invalid refresh CSRF token' });
+    }
+
+    const decoded = jwt.verify(refreshToken, refreshSecret);
+    if (decoded.type !== 'refresh') {
+      return res.status(401).json({ success: false, message: 'Invalid refresh token' });
+    }
+
+    const user = await User.findById(decoded.id);
+    if (!user || !user.isActive) {
+      return res.status(401).json({ success: false, message: 'User not found or inactive' });
+    }
+
+    const accessToken = generateAccessToken(user._id);
+    const rotatedRefreshToken = generateRefreshToken(user._id);
+    attachAuthCookies(res, rotatedRefreshToken);
+
+    return res.json({
+      success: true,
+      data: {
+        accessToken,
+        token: accessToken,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          studentId: user.studentId,
+          totalVolunteerHours: user.totalVolunteerHours
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Refresh token error:', error);
+    return res.status(401).json({ success: false, message: 'Refresh token is not valid' });
+  }
+});
+
+// @route   POST /api/auth/logout
+// @desc    Clear refresh token cookie
+// @access  Public
+router.post('/logout', async (req, res) => {
+  if (!validateRefreshCsrf(req)) {
+    return res.status(403).json({ success: false, message: 'Invalid logout CSRF token' });
+  }
+
+  res.clearCookie('refreshToken', { path: '/api/v1/auth' });
+  res.clearCookie('refreshCsrfToken', { path: '/api/v1/auth' });
+  return res.json({ success: true, message: 'Logged out successfully' });
+});
+
 // @route   POST /api/auth/forgot-password
-// @desc    Send OTP for password reset
+// @desc    Send OTP for password reset (SEC-02: generic response for all accounts)
 // @access  Public
 router.post('/forgot-password', [
   body('email').isEmail().withMessage('Please provide a valid email'),
@@ -277,49 +398,45 @@ router.post('/forgot-password', [
 
     const { email } = req.body;
 
-    // Find user by email
+    // SEC-02: Always return generic response to prevent user enumeration
+    // But still process if user exists
     const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'No account found with this email address' });
-    }
 
-    // Check if user is active
-    if (!user.isActive) {
-      return res.status(401).json({ success: false, message: 'Account is deactivated' });
-    }
+    if (user && user.isActive) {
+      try {
+        // Generate OTP
+        const otp = generateOTP();
 
-    console.log(`🔑 Password reset request for user: ${user.name} (${user.email})`);
+        // Delete any existing OTPs for this email
+        await PasswordResetOTP.deleteMany({ email });
 
-    // Generate OTP
-    const otp = generateOTP();
-    
-    // Delete any existing OTPs for this email
-    await PasswordResetOTP.deleteMany({ email });
+        // Store new OTP (hashed)
+        const otpHash = await bcrypt.hash(otp, 10);
+        await PasswordResetOTP.create({
+          email,
+          otp: otpHash,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
+        });
 
-    // Store new OTP
-    const otpHash = await bcrypt.hash(otp, 10);
-    await PasswordResetOTP.create({
-      email,
-      otp: otpHash,
-      expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
-    });
-
-    // Send OTP via email
-    const emailResult = await sendPasswordResetOTP(user, otp);
-    
-    if (emailResult.success) {
-      res.json({ 
-        success: true, 
-        message: 'OTP has been sent to your email address',
-        data: { email } // Return email for verification step
-      });
+        // Send OTP via email (best-effort)
+        const emailResult = await sendPasswordResetOTP(user, otp);
+        if (!emailResult.success) {
+          console.warn(`Failed to send password reset OTP to ${email}`);
+        }
+      } catch (error) {
+        console.error(`Error processing password reset for ${email}:`, error);
+        // swallow errors to preserve generic response
+      }
     } else {
-      console.error('Failed to send OTP email:', emailResult.error);
-      res.status(500).json({ 
-        success: false, 
-        message: 'Failed to send OTP. Please try again later.' 
-      });
+      // Log the miss for security monitoring (no PII in production logs)
+      console.warn(`Forgot password requested for unknown or inactive account`);
     }
+
+    // SEC-02: Return a generic success response regardless of whether account exists
+    return res.json({
+      success: true,
+      message: 'If an account exists for the provided email, an OTP has been sent.'
+    });
   } catch (error) {
     console.error('Forgot password error:', error);
     res.status(500).json({ message: 'Server error during password reset request' });

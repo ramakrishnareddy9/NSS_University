@@ -67,19 +67,16 @@ function ensureClient() {
 
 function getModel() {
   ensureClient();
-  let lastError = null;
+  // Note: genAI.getGenerativeModel() is synchronous and rarely throws.
+  // Real errors occur only on first API call. We return the model and validate on first use.
   for (const modelName of FALLBACK_MODELS) {
     try {
       const model = genAI.getGenerativeModel({ model: modelName });
       return { model, modelName };
     } catch (error) {
-      lastError = error;
       console.error(`⚠️  Failed to initialize Gemini model "${modelName}": ${error.message}`);
+      // Continue to next fallback
     }
-  }
-
-  if (lastError) {
-    throw lastError;
   }
 
   throw new Error('Unable to initialize Gemini model. Set GEMINI_MODEL to a supported model name.');

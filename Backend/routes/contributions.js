@@ -80,7 +80,8 @@ router.post('/', [
   auth,
   authorize('student'),
   body('participationId').notEmpty().withMessage('Participation ID is required'),
-  body('report').trim().notEmpty().withMessage('Report is required')
+  body('report').trim().notEmpty().withMessage('Report is required'),
+  body('evidence').optional().isArray().withMessage('evidence must be an array')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -104,16 +105,17 @@ router.post('/', [
       return res.status(404).json({ success: false, message: 'Participation not found' });
     }
 
-    if (!participation) {
-      return res.status(404).json({ success: false, message: 'Participation not found' });
-    }
-
     if (participation.student.toString() !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
     if (participation.status !== 'attended' && participation.status !== 'completed') {
       return res.status(400).json({ success: false, message: 'Participation must be attended or completed' });
+    }
+
+    // BL-08: Ensure attendance flag is true (not just status)
+    if (!participation.attendance) {
+      return res.status(400).json({ success: false, message: 'Participation attendance must be recorded before submitting contribution' });
     }
 
     // Check if contribution already exists
@@ -130,6 +132,7 @@ router.post('/', [
       student: req.user.id,
       event: participation.event._id,
       participation: participationId,
+      academicYear: participation.event.academicYear || null,
       report,
       volunteerHours: parseFloat(recordedHours),
       evidence: evidence || []
@@ -143,10 +146,8 @@ router.post('/', [
     // Do NOT overwrite participation.volunteerHours here; it should be set by admin attendance
     await participation.save();
 
-    // Add contribution to user's contributions list (hours are added when attendance is marked)
-    const user = await User.findById(req.user.id);
-    user.contributions.push(contribution._id);
-    await user.save();
+    // Hours and contributions are queried from the Contribution collection.
+    // Do not embed contribution ids in User to avoid unbounded array growth (DB-01).
 
     await contribution.populate('student', 'name email studentId');
     await contribution.populate('event', 'title eventType');

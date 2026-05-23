@@ -90,7 +90,13 @@ participationSchema.index({ student: 1, event: 1 }, { unique: true });
 participationSchema.index({ event: 1, waitlistStatus: 1, waitlistedAt: 1 });
 // Indexes for admin approval queries
 participationSchema.index({ event: 1, status: 1 });
-participationSchema.index({ student: 1, status: 1 });
+// Support queries for recent participations by student and status
+participationSchema.index({ student: 1, status: 1, createdAt: -1 });
+
+// Denormalized academic year for efficient reporting and leaderboard queries
+participationSchema.add({
+  academicYear: { type: String, trim: true, index: true }
+});
 
 module.exports = mongoose.model('Participation', participationSchema);
 

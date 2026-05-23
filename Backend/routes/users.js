@@ -105,7 +105,7 @@ router.get('/student/:id', auth, validateObjectId('id'), async (req, res) => {
 
     const student = await User.findById(req.params.id)
       .select('-password')
-      .populate('contributions');
+      ;
 
     if (!student || student.role !== 'student') {
       return res.status(404).json({ success: false, message: 'Student not found' });

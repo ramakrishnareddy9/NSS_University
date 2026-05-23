@@ -858,10 +858,10 @@ async function notifyAllStudentsAboutEvent(event, problem, req) {
         io.to(roomName).emit('new-event', notificationData);
       });
 
-      // Also broadcast to all connected clients
-      io.emit('new-event-broadcast', notificationData);
-      
-      console.log(`✅ WebSocket notifications sent to ${students.length} students`);
+      // Admin-scoped broadcast for dashboards (avoid public broadcast)
+      io.to('admin-notifications').emit('new-event-broadcast', notificationData);
+
+      console.log(`✅ WebSocket notifications sent to ${students.length} students (individual rooms)`);
 
       // Store notifications in database for students who are offline
       console.log('💾 Storing notifications in database...');
@@ -880,7 +880,7 @@ async function notifyAllStudentsAboutEvent(event, problem, req) {
           },
           read: false
         }).catch(err => {
-          console.error(`Failed to store notification for ${student.name}:`, err.message);
+          console.error(`Failed to store notification for student id ${student._id}:`, err.message);
         });
       });
       

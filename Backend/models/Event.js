@@ -60,10 +60,6 @@ const eventSchema = new mongoose.Schema({
     url: String,
     publicId: String
   }],
-  participations: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Participation'
-  }],
   summaryReport: {
     url: { type: String, default: null },
     publicId: { type: String, default: null },
